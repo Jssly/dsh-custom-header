@@ -1,0 +1,5 @@
+# dsh-custom-header bundle patch: mount the gateway client-signature
+# plugin under its package name, resolved through the profile's node_modules.
+- insert:
+    - id: dsh-custom-header
+      name: dsh-custom-header
