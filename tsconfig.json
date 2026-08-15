@@ -3,7 +3,10 @@
     "strict": true,
     "noImplicitAny": true,
     "target": "ES2022",
-    "lib": ["ES2022", "DOM"],
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "rootDir": "src",
@@ -13,7 +16,18 @@
     "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["node"]
+    "baseUrl": ".",
+    "paths": {
+      "@deepseek-ai/*": [
+        "stubs/@deepseek-ai/*"
+      ]
+    },
+    "types": [
+      "node"
+    ],
+    "jsx": "react-jsx"
   },
-  "include": ["src"]
+  "include": [
+    "src"
+  ]
 }

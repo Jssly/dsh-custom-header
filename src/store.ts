@@ -1,83 +1,112 @@
 /**
- * Persistent store for a runtime profile choice (and future settings UI):
- * JSON file under DSH_HOME/plugins (dsh-custom-header.json), same location
- * the official harness keeps plugin state. Writes are atomic (tmp + rename)
- * and mode 0600 — the file holds hostnames and a profile id, nothing secret,
+ * Persistent settings store: the plugin's settings live in a JSON file
+ * under DSH_HOME/plugins (dsh-custom-header.json), the same place the
+ * official harness keeps plugin state. Writes are atomic (tmp + rename)
+ * and mode 0600 — the file holds hostnames and profile ids, nothing secret,
  * but plugin storage should not be world-readable either.
  *
- * Only the `profile` field persists here; every other field stays in
- * cordis.yml (deployment config) or defaults. Explicit cordis.yml profile
- * wins over the persisted choice (see index.ts).
+ * Precedence: persisted file fields > cordis.yml seed fields > factory
+ * defaults. An explicitly set cordis.yml `profile` still wins over the
+ * persisted profile (deployment intent beats a saved UI selection), applied
+ * by the plugin body after this store resolves.
  */
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import type { GatewayClientProfileId } from './types.ts'
-import { isGatewayClientProfileId } from './types.ts'
+import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+import type { ResolvedCustomHeaderConfig } from './config.ts'
+import { normalizeCustomHeaderConfig } from './config.ts'
+import { CUSTOM_HEADER_SETTINGS_DEFAULTS } from './settings.ts'
 
-interface StoredState {
-	readonly version: 1
-	readonly profile?: GatewayClientProfileId
+interface StoredSettings {
+  readonly version: 2
+  readonly settings: ResolvedCustomHeaderConfig
 }
 
-const STORAGE_VERSION = 1 as const
+const STORAGE_VERSION = 2 as const
 
-function readStored(dataFile: string): GatewayClientProfileId | undefined {
-	try {
-		const raw = JSON.parse(readFileSync(dataFile, 'utf8')) as Partial<StoredState>
-		if (raw !== null && typeof raw === 'object' && raw.version === STORAGE_VERSION) {
-			const profile = raw.profile
-			if (typeof profile === 'string' && isGatewayClientProfileId(profile)) {
-				return profile
-			}
-		}
-		return undefined
-	} catch {
-		return undefined
-	}
+/** Default data file: $DSH_HOME/plugins/dsh-custom-header.json. */
+export function settingsStoreFile(): string {
+  const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return join(dshHome, 'plugins', 'dsh-custom-header.json')
 }
 
-/** Runtime profile choice holder (get / set / persist). */
-export class ProfileStore {
-	constructor(
-		private readonly dataFile: string,
-		private profile: GatewayClientProfileId | undefined,
-	) {}
-
-	/** The persisted profile choice, if any. */
-	read(): GatewayClientProfileId | undefined {
-		return this.profile
-	}
-
-	/** Persist a new profile choice and return it. */
-	set(profile: GatewayClientProfileId): GatewayClientProfileId {
-		this.profile = profile
-		this.persist()
-		return profile
-	}
-
-	/** Atomic write (tmp + rename), best-effort: a failed write must not kill a save. */
-	private persist(): void {
-		try {
-			const dir = this.dataFile.slice(0, this.dataFile.lastIndexOf('/'))
-			if (dir) mkdirSync(dir, { recursive: true })
-			const tmp = `${this.dataFile}.tmp-${process.pid}`
-			const stored: StoredState = { version: STORAGE_VERSION, profile: this.profile }
-			writeFileSync(tmp, JSON.stringify(stored, null, 2), { mode: 0o600 })
-			renameSync(tmp, this.dataFile)
-		} catch (error) {
-			console.error(`[dsh-custom-header] profile persist failed: ${error instanceof Error ? error.message : String(error)}`)
-		}
-	}
+/** Read the persisted settings file; null when absent/corrupt. */
+function readStored(dataFile: string): Partial<ResolvedCustomHeaderConfig> | null {
+  try {
+    const raw = JSON.parse(readFileSync(dataFile, 'utf8')) as Partial<StoredSettings>
+    if (
+      raw !== null && typeof raw === 'object' && raw.version === STORAGE_VERSION &&
+      typeof raw.settings === 'object' && raw.settings !== null
+    ) {
+      return raw.settings as Partial<ResolvedCustomHeaderConfig>
+    }
+    return null
+  } catch {
+    return null
+  }
 }
 
-/** Locate the plugin state file under DSH_HOME (defaults to ~/.dsh). */
-export function profileStoreFile(): string {
-	const base = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-	return join(base, 'plugins', 'dsh-custom-header.json')
+/** The plugin's runtime settings holder (get / update / persist). */
+export class SettingsStore {
+  private config: ResolvedCustomHeaderConfig
+
+  /**
+   * @param dataFile - where settings persist.
+   * @param seed - cordis.yml seed (used per-field when the file has no value).
+   * @param defaults - factory defaults (reset target).
+   */
+  constructor(
+    private readonly dataFile: string,
+    seed: Partial<ResolvedCustomHeaderConfig>,
+    private readonly defaults: ResolvedCustomHeaderConfig = CUSTOM_HEADER_SETTINGS_DEFAULTS,
+  ) {
+    this.config = normalizeCustomHeaderConfig({
+      ...defaults,
+      ...seed,
+      ...(readStored(dataFile) ?? {}),
+    })
+  }
+
+  /** Current resolved settings. */
+  get(): ResolvedCustomHeaderConfig {
+    return this.config
+  }
+
+  /** View: current config + defaults (what the settings tab renders). */
+  view(): { config: ResolvedCustomHeaderConfig; defaults: ResolvedCustomHeaderConfig } {
+    return {
+      config: { ...this.config },
+      defaults: { ...this.defaults },
+    }
+  }
+
+  /**
+   * Merge a partial patch into the current settings, persist, and return the
+   * fresh view. Invalid values are sanitized by normalizeCustomHeaderConfig
+   * (never throws for bad input).
+   */
+  update(patch: Record<string, unknown>): { config: ResolvedCustomHeaderConfig; defaults: ResolvedCustomHeaderConfig } {
+    this.config = normalizeCustomHeaderConfig({ ...this.config, ...patch })
+    this.persist()
+    return this.view()
+  }
+
+  /** Atomic write (tmp + rename), best-effort: a failed write must not kill a save. */
+  private persist(): void {
+    try {
+      const dir = dirname(this.dataFile)
+      mkdirSync(dir, { recursive: true })
+      const tmp = `${this.dataFile}.tmp-${process.pid}`
+      const stored: StoredSettings = { version: STORAGE_VERSION, settings: this.config }
+      writeFileSync(tmp, JSON.stringify(stored, null, 2), { mode: 0o600 })
+      renameSync(tmp, this.dataFile)
+    } catch (error) {
+      console.error(`[dsh-custom-header] settings persist failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 }
 
-/** Build a store seeded from an existing file (absent/corrupt → undefined). */
-export function openProfileStore(dataFile = profileStoreFile()): ProfileStore {
-	return new ProfileStore(dataFile, readStored(dataFile))
+/** Open the store for the default data file location. */
+export function openSettingsStore(dataFile = settingsStoreFile()): SettingsStore {
+  return new SettingsStore(dataFile, {})
 }

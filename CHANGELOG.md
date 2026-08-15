@@ -41,7 +41,19 @@
   `model.api` 判断的语义（覆盖 baseUrl 带路径段的自建网关）
 - 冒烟测试扩展至 7 场景 25 断言（新增会话隔离、前缀路由）
 
-### 0.1.2（2026-08-15）
+### 0.1.3（2026-08-15）
+
+- 新增 **Settings → Plugins「请求头修改 / Custom Header」设置页**：
+  client 端 React 面板 + Typert Remote 命名空间
+  `customHeader/settingsGet|settingsSet`（host manifest + 浏览器 bundle，
+  构建升级为 host + client 双产物）。字段：profile 下拉、
+  autoCodexProfile、autoHosts 列表、claudeSystemMode、各版本号、
+  opencodeClient/Project；保存即生效并持久化。
+- 设置存储升级为完整配置（version 2）：持久化文件字段 > cordis.yml 字段 >
+  默认值；显式 cordis.yml `profile` 仍优先。
+- 依赖新增 zod（strict codecs）、react（客户端面板，optional peer）。
+
+## 0.1.2（2026-08-15）
 
 - 预设 `sub2api_pi_agent` 改名为 `pi_agent`（配置标识符去品牌化）；
   旧值不再识别，需手工更新 cordis.yml 与持久化 JSON 中的 profile 值。

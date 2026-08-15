@@ -147,16 +147,23 @@ dsh-custom-header:
   persistProfile: true
 ```
 
-Runtime profile switch (persisted to `$DSH_HOME/plugins/dsh-custom-header.json`;
-an explicit cordis.yml `profile` wins):
+## Settings page
+
+Settings → Plugins → **Custom Header** (请求头修改) tab: choose the
+`profile`, the auto fallback, edit the `autoHosts` allowlist, switch the
+Claude system-block mode (`identity` / `billing`) and tune the version
+fields — all host-validated. Save writes the patch over the
+`customHeader/settingsSet` Typert Remote endpoint and applies to the next
+request (the fetch middlewares read the same state object), no reload.
 
 ```js
 ctx.dshCustomHeader.setProfile('codex_desktop')
 ctx.dshCustomHeader.status()   // diagnostics snapshot
 ```
 
-Precedence: **explicit cordis.yml profile > persisted JSON > remaining
-cordis fields / defaults**.
+Precedence: **persisted file fields > cordis.yml fields > defaults**,
+except an explicitly set cordis.yml `profile`, which still wins over the
+persisted one (deployment intent beats a saved UI selection).
 
 ## Known residuals & limits
 

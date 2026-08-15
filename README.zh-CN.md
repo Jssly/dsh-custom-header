@@ -142,8 +142,13 @@ dsh-custom-header:
   persistProfile: true
 ```
 
-运行时切换 profile（持久化到 `$DSH_HOME/plugins/dsh-custom-header.json`，
-显式 cordis.yml `profile` 优先）：
+## 设置页面
+
+设置 → 插件 → **请求头修改 / Custom Header** Tab：下拉选择 `profile` 与
+auto 兜底预设、编辑 `autoHosts` 白名单、切换 Claude system 块模式
+（`identity` / `billing`）、调整各版本号字段——全部经宿主校验。保存通过
+`customHeader/settingsSet`（Typert Remote）写入并**立即生效**（fetch
+中间件读取同一个状态对象），无需刷新。
 
 ```js
 // 任意插件 / 脚本里：
@@ -151,7 +156,8 @@ ctx.dshCustomHeader.setProfile('codex_desktop')
 ctx.dshCustomHeader.status()   // 诊断快照
 ```
 
-优先级：**显式 cordis.yml profile > 持久化 JSON > cordis 其余字段/默认值**。
+优先级：**持久化文件字段 > cordis.yml 字段 > 默认值**；特例：显式设置的
+cordis.yml `profile` 仍优先于持久化 profile（部署意图优于页面选择）。
 
 ## 已知残留与限制
 

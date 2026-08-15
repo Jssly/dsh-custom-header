@@ -19,10 +19,11 @@
  *     `GenerateOptions.sessionId` + AsyncLocalStorage (session-context.ts)
  *   - 403 diagnostics       → `llm/stream` waterfall observer
  *
- * Config: cordis.yml `dsh-custom-header:` section (schema below), plus an
- * optional runtime profile choice persisted under
- * `$DSH_HOME/plugins/dsh-custom-header.json` (explicit cordis.yml profile
- * wins over persisted state).
+ * Config: cordis.yml `dsh-custom-header:` section (schema below), plus a
+ * persisted settings file under `$DSH_HOME/plugins/dsh-custom-header.json`
+ * (explicit cordis.yml profile wins over the persisted profile). The
+ * Settings → Plugins "Custom Header" tab (src/client) reads and writes
+ * those settings over the `customHeader` Typert Remote namespace.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -34,14 +35,17 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-agent'
 
 import { normalizeCustomHeaderConfig, hasExplicitCordisProfile, CUSTOM_HEADER_DEFAULTS, ConfigSchema, type ConfigType, type ResolvedCustomHeaderConfig } from './config.ts'
+import { CUSTOM_HEADER_SETTINGS_DEFAULTS } from './settings.ts'
 import { getProfileMenuEntries, type GatewayHeaderProfile } from './profiles.ts'
 import { registerFetchMiddleware } from './fetch-pipeline.ts'
 import { createHeaderStripMiddleware, createHeaderInjectMiddleware } from './header-inject.ts'
 import { createUrlRewriteMiddleware } from './url-rewrite.ts'
 import { createBodyPatchMiddleware } from './body-patch.ts'
 import { format403Hint } from './response-hints.ts'
-import { openProfileStore, type ProfileStore } from './store.ts'
+import { SettingsStore, settingsStoreFile } from './store.ts'
 import { requestSessionContext } from './session-context.ts'
+import { CustomHeaderRuntime, type CustomHeaderRuntimeHooks } from './runtime.ts'
+import { TYPERT_MANIFEST } from './typert.ts'
 import type { GatewayClientProfileId } from './types.ts'
 
 /** Cordis plugin name (the Loader entry). */
@@ -90,7 +94,7 @@ interface RuntimeState {
   config: ResolvedCustomHeaderConfig
 }
 
-/** The plugin's public service surface (future settings UI / diagnostics). */
+/** The plugin's public service surface (diagnostics + programmatic switch). */
 export interface CustomHeaderService {
   /** Effective profile & resolved config (diagnostics core). */
   status(): { profile: GatewayClientProfileId; effective: string; config: ResolvedCustomHeaderConfig; profileMenu: string[] }
@@ -105,17 +109,16 @@ export interface CustomHeaderService {
  */
 export function apply(ctx: Context, config?: ConfigType): void {
   const seed = normalizeCustomHeaderConfig((config ?? {}) as Record<string, unknown>)
-
-  // Runtime profile choice from the persisted store; an explicit cordis.yml
-  // profile wins over it (deployment intent beats a saved UI selection).
-  const store: ProfileStore = openProfileStore()
-  const persisted = store.read()
   const explicit = hasExplicitCordisProfile((config ?? {}) as Record<string, unknown>)
-  const initial: ResolvedCustomHeaderConfig = explicit || persisted === undefined
-    ? seed
-    : { ...seed, profile: persisted }
 
-  const state: RuntimeState = { profile: initial.profile, config: initial }
+  // Persisted settings file fields > cordis.yml seed fields > defaults. An
+  // explicitly set cordis.yml profile still wins over the persisted profile
+  // (deployment intent beats a saved UI selection).
+  const store = new SettingsStore(settingsStoreFile(), seed)
+  const resolved = store.get()
+  if (explicit) resolved.profile = seed.profile
+
+  const state: RuntimeState = { profile: resolved.profile, config: resolved }
 
   // ---- fetch middleware chain (priority ascending) ----
   registerFetchMiddleware({
@@ -156,9 +159,8 @@ export function apply(ctx: Context, config?: ConfigType): void {
   // Every iteration of the adapter's stream (including the fetch it issues)
   // runs inside AsyncLocalStorage carrying GenerateOptions.sessionId, so the
   // fetch middlewares can scope x-opencode-session / X-Claude-Code-Session-Id
-  // per DSH conversation instead of sharing one process-wide id. (The pi
-  // extension is single-session, so module-level ids were correct there; a
-  // concurrent DSH agent would otherwise steal another conversation's ids.)
+  // per DSH conversation instead of sharing one process-wide id (concurrent
+  // DSH agents would otherwise steal another conversation's ids).
   const logger = ctx.logger
   ctx.on('llm/stream', function (_options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) {
     const inner = next()
@@ -208,10 +210,51 @@ export function apply(ctx: Context, config?: ConfigType): void {
     },
     setProfile(profile: GatewayClientProfileId) {
       state.profile = profile
-      if (state.config.persistProfile) store.set(profile)
+      state.config.profile = profile
+      if (state.config.persistProfile) {
+        store.update({ profile })
+      }
       logger.info(`[dsh-custom-header] profile -> ${profile}`)
     },
   } satisfies CustomHeaderService)
+
+  // ---- settings page (Typert Remote) ----
+  // Registered only when the host provides the strict Typert registry; the
+  // fetch-pipeline core works without it. The runtime forwards to the same
+  // state the middlewares read, so saves apply immediately.
+  const hooks: CustomHeaderRuntimeHooks = {
+    getView() {
+      return {
+        config: { ...state.config },
+        defaults: { ...CUSTOM_HEADER_SETTINGS_DEFAULTS },
+      }
+    },
+    applyPatch(patch) {
+      const view = store.update(patch)
+      let next = view.config
+      if (explicit) next = { ...next, profile: seed.profile }
+      state.config = next
+      state.profile = next.profile
+      const keys = Object.keys(patch)
+      logger.info(`[dsh-custom-header] settings updated${keys.length ? `: ${keys.join(', ')}` : ''}`)
+      return {
+        config: { ...next },
+        defaults: { ...CUSTOM_HEADER_SETTINGS_DEFAULTS },
+      }
+    },
+  }
+
+  ctx.effect(() => {
+    const typert = ctx.get('typert') as
+      | { register(manifest: unknown): unknown; get?(name: string): unknown }
+      | undefined
+    if (typert === undefined || typeof typert.register !== 'function') return
+    void new CustomHeaderRuntime(ctx, hooks)
+    const dispose = typert.register(TYPERT_MANIFEST) as (() => void) | undefined
+    return () => {
+      if (typeof dispose === 'function') void dispose()
+    }
+  }, 'dsh-custom-header: typert manifest + customHeader runtime')
 
   // ---- startup diagnostics ----
   diagnostics(ctx, state)
@@ -250,7 +293,7 @@ export { resolveProfileForUrl, getProfileMenuEntries, hostMatchesAutoHosts, desc
 export { normalizeCustomHeaderConfig, CUSTOM_HEADER_DEFAULTS, type ResolvedCustomHeaderConfig } from './config.ts'
 export { patchAnthropicMessagesPayload } from './body-patch.ts'
 export { isGatewayClientProfileId } from './types.ts'
-export { openProfileStore, type ProfileStore } from './store.ts'
+export { openSettingsStore, settingsStoreFile, type SettingsStore } from './store.ts'
 export { registerFetchMiddleware, ensureFetchPipeline, type FetchMiddleware } from './fetch-pipeline.ts'
 export { createUrlRewriteMiddleware, type UrlRewriteTarget } from './url-rewrite.ts'
 export { createHeaderStripMiddleware, createHeaderInjectMiddleware } from './header-inject.ts'
