@@ -244,7 +244,12 @@ export function apply(ctx: Context, config?: ConfigType): void {
     },
   }
 
-  ctx.effect(() => {
+  // Use ctx.inject() so the Typert manifest + Remote service are registered
+  // only after the 'typert' service is available. In a fresh install the
+  // Typert registry may not be loaded yet when this plugin starts; inject()
+  // waits for the dependency and calls the callback when it's ready, unlike
+  // effect() which may bail early and never re-fire.
+  ctx.inject(['typert'], (ctx) => {
     const typert = ctx.get('typert') as
       | { register(manifest: unknown): unknown; get?(name: string): unknown }
       | undefined
@@ -254,7 +259,7 @@ export function apply(ctx: Context, config?: ConfigType): void {
     return () => {
       if (typeof dispose === 'function') void dispose()
     }
-  }, 'dsh-custom-header: typert manifest + customHeader runtime')
+  })
 
   // ---- startup diagnostics ----
   diagnostics(ctx, state)

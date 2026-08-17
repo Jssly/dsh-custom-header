@@ -193,12 +193,17 @@ export function CustomHeaderSettingsTab(props: {
   }
 
   const handleSave = async (): Promise<void> => {
-    const patch = buildPatch(form, loadedConfig)
-    if (Object.keys(patch).length === 0) {
+    // buildPatch returns { patch: {...} }; unwrap before passing to save(),
+    // which wraps the field object one more time as settingsSet({ patch }).
+    // Without the unwrap the wire payload would be { patch: { patch: {...} } }
+    // and the host's normalizeCustomHeaderConfig would drop every unknown key
+    // (silent no-op: "Saved ✓" but nothing changed).
+    const built = buildPatch(form, loadedConfig)
+    if (Object.keys(built.patch).length === 0) {
       setFeedback(t('saved'))
       return
     }
-    void save(patch)
+    void save(built.patch)
   }
 
   const handleReset = async (): Promise<void> => {
