@@ -1,0 +1,13 @@
+workspace:
+  name: "期权分析"
+
+  system_prompts:
+    default:
+      file: doc/prompts/default.md
+      parameters:
+        temperature: 0.2
+
+    dev:
+      file: doc/prompts/dev.md
+      parameters:
+        temperature: 0.2
