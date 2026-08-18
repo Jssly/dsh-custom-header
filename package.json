@@ -1,12 +1,59 @@
 {
-  "name": "dsh-scene",
+  "name": "dsh-profile-selector",
   "version": "1.0.0",
-  "description": "",
+  "description": "双模式 .deepseek.yaml 提示词档案选择器：开发用动态插件（dshy-1），发布用静态插件（dsh-profile-selector）。",
   "license": "ISC",
-  "author": "",
-  "type": "commonjs",
-  "main": "index.js",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "dist",
+    "src",
+    "README.md"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "node build.mjs"
+  },
+  "jest": {
+    "verbose": false,
+    "collectCoverage": true,
+    "globals": {},
+    "setupFilesAfterEnv": [
+      "<rootDir>/jest/setup/setupFileAfterEnv.js"
+    ],
+    "testMatch": [
+      "<rootDir>/**/*.test.js"
+    ],
+    "testEnvironment": "node",
+    "moduleFileExtensions": [
+      "js"
+    ],
+    "testTimeout": 120000
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "jest": "^30.4.2"
+  },
+  "dependencies": {
+    "react": "^19.2.8"
   }
 }

@@ -1,0 +1,12 @@
+# 依赖与构建产物
+node_modules/
+.pnpm-store/
+.pnpm-workspace.yml
+yarn.lock
+
+# 构建产物（由 build.mjs 生成；如需发布静态模式则保留 lib/ 与 dist/）
+# lib/
+# dist/
+
+# IDE
+.idea/

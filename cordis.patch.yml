@@ -1,0 +1,12 @@
+# dsh-profile-selector — 静态模式挂载层
+#
+# 经 dsh plugin --profile web add file:$(pwd) 安装后，本 patch 把静态 Host
+# 半区插入 web profile 的 loader。插件名与 package.json 的 name 一致。
+# 动态模式（开发）不经过本文件：直接 cordis_define + cordis_run。
+#
+# inject: [connection] —— RPC 通道依赖 connection 服务（dsh-client-connection
+# 提供）先就绪；不声明会静默退出（/rpc 通道 405 不注册）。
+- insert:
+    - id: dsh-profile-selector
+      name: dsh-profile-selector
+      inject: [connection]

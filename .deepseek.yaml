@@ -3,6 +3,7 @@ workspace:
 
   system_prompts:
     default:
+      name: "分析师"
       file: doc/prompts/default.md
       parameters:
         temperature: 0.2
