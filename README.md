@@ -14,7 +14,7 @@
 > **状态**：✅ 已迁移为独立项目 `dsh-scene`（源码 + 提示词档案 + 工作区配置一体化管理，git 仓库管理，2026-08-18）
 > **版本说明**：Package 编号按插件实例计数，DSH 进程重启后重新从 pkg-1 计数（动态插件定义在进程内存，
 > 重启即丢，需重新部署——见 §8.1）；
-> 本仓库功能演进以「功能版本」为准（见 §七 版本历史，当前 = pkg-18：修复切换对话误读用户目录 .deepseek.yaml）。
+> 本仓库功能演进以「功能版本」为准（见 §七 版本历史，当前 = pkg-20：工作区没有 .deepseek.yaml 时不显示下拉框）。
 > **档案约束**（属提示词档案内容，与插件逻辑无关）：客户不持有现货、不做备兑；标的=上证50ETF华夏（510050）。
 
 ---
@@ -291,6 +291,7 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 | pkg-17 | **档案子项支持可选 `name` 字段**：Host `loadProfiles` 解析 `system_prompts.<key>.name` 并随 RPC 返回 `title`（缺省回退 key）；Client 下拉框选项/单档案展示/悬停 title 均显示 `profile-<title>`（如 `default` 有 `name:"分析师"` → `profile-分析师`，`dev` 无 `name` → `profile-dev`）；选项 value 与 activate 仍用档案 key，向后兼容 | ✅ 双模式同步生效（2026-08-19） |
 | pkg-18 | **修复切换对话误读用户目录 `.deepseek.yaml`**：根因 `sessionCwd()` 在 agent 未就绪时回退部署级 `sandboxPolicy.workspaceRoot`（`/home/j/workspace/dsh`）。修复：① Client 从会话 store（`useSessions` → `s.byId[sessionId].cwd`）显式传 `cwd` 给 RPC；② Host `sessionCwd(sessionId, explicitCwd)` 按「显式 cwd → 缓存 → agent header」解析并缓存；③ 解析不到返回 `null` + 明确错误，**不回退部署根** | ✅ 双模式同步生效（2026-08-19，动态 run-1 / 静态需重启 web 加载新 host bundle） |
 | pkg-19 | **修复「新建会话下拉框已加载但 activate 报『会话不存在或未激活』」**：根因 `agents.get(sessionId)` 只返回已激活 agent，会话存在但 agent 未发布（新会话空白期/冷会话/DSH 重启未恢复）被误判为会话不存在。修复：① activate 在 agent 缺失时查会话真实存在性（`sessions` + `sessionPersistence.list()`，查询失败按存在处理），存在则暂存 `pending` Map 并返回 `{ok:true, pending:true}`；② 新增 `ctx.on('agent/created')` 监听，agent 发布后经 `enqueue` 串行调用共享 `applyActivation()` 自动应用；③ `.state` 把 pending 档案算当前选中；④ Client 对 `pending:true` 显示「已排队(会话激活后生效)」而非红字；⑤ `dispose` 清空 pending。详见 §六-8 | ✅ 单测 10 项全过（2026-08-19）；动态 run-1 已生效；静态需重启 web 加载新 host bundle |
+| pkg-20 | **工作区没有 `.deepseek.yaml` 时不显示下拉框**：Client 加载失败（fatal：读文件 ENOENT / cwd 未就绪 / RPC 失败）时不再渲染红色 `.err` 报错文字，改为 `return null` 直接不渲染下拉框；空档案（无 `system_prompts`）同样不渲染。仅切换失败仍渲染红色 `.err` 行内文字 | ✅ 双模式同步生效（2026-08-25，动态 run-1 已生效；静态需同步 bundle 后刷新页面） |
 
 **仓库整理（非插件功能版本，2026-08-18）**：独立为 git 仓库 `dsh-scene`——源码落盘 `src/`、档案并入 `doc/prompts/`、
 `.deepseek.yaml` 与 `package.json` 随仓库管理，README 重构；双模式重构后删除旧的 `src/host.js`/`src/client.js`

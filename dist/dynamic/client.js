@@ -24,7 +24,8 @@
  * 关键机制（勿随意改动，详见 README.md「已知坑」）：
  * 1. autoFired Set：每个会话的自动加载只触发一次（防 React 严格模式双挂载重复激活）；
  * 2. 成功反馈只进 select 的 title（tooltip），不渲染行内文字——避免挤动布局导致下拉框错位；
- *    仅错误才渲染红色 .err 行内文字；
+ *    加载失败（如工作区没有 .deepseek.yaml）时不渲染下拉框（return null，不报红字）；
+ *    仅切换失败才渲染红色 .err 行内文字；
  * 3. 选项文案格式「profile-<title>」：title 取档案子项可选 name 字段，缺省回退档案 key
  *    （如 default 有 name:"分析师" → profile-分析师；dev 无 name → profile-dev）；
  *    无空值项，无"系统默认"项。
@@ -103,8 +104,9 @@ function clientCore(ctx, opts, deps) {
       }).catch((err) => setError('失败: ' + String((err && err.message) || err)))
     }
     if (profiles === null) return React.createElement('span', null, 'profile…')
-    if (fatal) return React.createElement('span', { className: 'err', title: String(fatal) }, 'profile:' + String(fatal))
-    if (profiles.length === 0) return React.createElement('span', { title: '未找到 .deepseek.yaml 的 system_prompts 配置' }, 'profile:—')
+    // 加载失败（如工作区没有 .deepseek.yaml / cwd 未就绪 / RPC 失败）→ 不渲染下拉框，不报红字
+    if (fatal) return null
+    if (profiles.length === 0) return null
     // 仅一个档案：无需选择，不出下拉框，静态展示档案名（自动加载逻辑仍生效）
     if (profiles.length === 1) {
       const only = profiles[0]
