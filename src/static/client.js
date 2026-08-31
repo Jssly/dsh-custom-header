@@ -41,5 +41,8 @@ export function apply(ctx) {
     },
   })
 }
-
-export default apply
+// 注意：不要 `export default apply`。DSH 0.1.2-alpha.2 的 loader `unwrapExports` 会优先取
+// exports.default 并解包成裸函数，导致插件对象上的 `inject` 丢失——静态 client 条目由 kernel
+// 按名字创建（无 options inject），只靠 bundle 导出的 inject 等待 slots/connection；
+// 丢失后 apply 立即执行、ctx.get('connection') 为 undefined → 静默退出 → 下拉框不渲染。
+// 只导出 { inject, apply }（与 dsh-custom-header 一致），让 unwrap 返回完整对象（见 README §七 pkg-23）。
