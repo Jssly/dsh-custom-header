@@ -142,3 +142,18 @@ shell.overlay（新注册 toast 组件，常驻，无消息渲染 null）
 - **教训**：新版 loader 对插件模块统一走 `unwrapExports`，任何 ESM/CJS bundle 都不要 `export default
   apply`——default 会被解包、丢掉同对象上的 `inject`/`name`。检查所有第三方 client 插件的 bundle
   导出形状（`__export(...)` 里有没有 `default`）。
+
+### 2.9 DSH 0.1.5-alpha.1 回归：connection.rpc.handle 失效（pkg-24，2026-09-09）
+- **现象**：`dsh plugin --profile web add file:/mnt/f/git/node/dsh-scene` → loader 报
+  `dsh: plugin tree failed to load: failed to apply loader entry dsh-profile-selector (dsh-profile-selector): cannot get property "webServer" without inject`
+  （`dsh-client-connection/lib/index.js:618`），条目回滚；profile package.json 不留依赖，但 `node_modules/.pnpm` 残留旧副本。
+- **根因**：0.1.5-alpha.1 把 `dsh-client-connection` 插件自身 inject 由 `["webServer","credentials"]` 改为 `["credentials"]`
+  （/api 路由改 `ctx.inject(['webServer'], ...)` 挂载）。`register()` 末行 `owner.effect(() => owner.webServer.register(route))`，
+  而 `rpc.handle` 的 owner 是 cordis 影子 Context（`symbols.shadow` = connection 服务 ctx），服务解析从 connection fiber
+  向上 → 找不到 webServer。**调用方 `inject: ['webServer']` 无效**（关键：别照报错提示改 inject）。
+- **修复**：`connection.register(ctx, '/rpc', handler)` 显式传 owner = 本插件 ctx（inject 含 webServer）。
+- **验证**（真实 `HostConnectionService` + cordis 4.0.2 合成宿主）：0.1.5（connection inject=[]）与 0.1.2-alpha.3（inject=[webServer]）
+  均注册 `prefix:/rpc`；强制 inject=`['connection']` 精确复现原报错。脚本为临时探针，验证后已删。
+- **备选（DSH 侧）**：`~/.dsh/profiles/web/cordis.patch.yml` 加 `- id: connection` + `inject: [webRuntime, webServer]` 可恢复 rpc.handle；
+  若上游修复（connection 重新自注入 webServer），本插件两种写法都可用。
+- **升级备忘**：新版 profile 启动时重新同步（`node_modules`/`package.json`/`cordis.yml`）；安装失败会回滚 package.json，重装前无需清理 .pnpm 残留。

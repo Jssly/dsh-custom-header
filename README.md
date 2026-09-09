@@ -259,9 +259,30 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 - **修复**：`src/static/host.js` 用 `routes` Map 登记 method→handler，**单次** `connection.rpc.handle('/rpc', ...)`，
   handler 内按 `endpoint`（即 method 名，如 `dshprofile-static.profiles`）分发；未知名返回 `{ok:false, error:{code:'not-found'}}`。
 - 配套：patch 与壳代码均声明 `inject: ['connection']`（硬依赖等待 connection 服务就绪，否则 apply 静默退出、/rpc 不注册）。
+  ⚠️ 2026-09-09 更新：DSH 0.1.5-alpha.1 起 `rpc.handle` 失效、改 `connection.register(ctx, ...)` 且需加 inject webServer，见 §六-9。
 - 浏览器侧调用形态（dsh-client-connection/lib/client.js `createWebConnectionRpc`）：`rpc.call(channel, endpoint, payload)`
   → `POST {channel}/{endpoint}`，body `{type:'client-request', rpcId, method: endpoint, payload}`；返回 `full.result`（即 RpcResult）。
 - 动态模式无此问题：`harness.handle` 每个 method 独立注册，无共享通道概念。
+
+### 9. ⚠️ DSH 0.1.5-alpha.1 回归：`connection.rpc.handle` 全员失效，改用 `connection.register(ctx, ...)`（2026-09-09 修复）
+- 症状：`dsh plugin --profile web add file:$(pwd)` 时 loader 报
+  `dsh: plugin tree failed to load: failed to apply loader entry dsh-profile-selector (dsh-profile-selector): cannot get property "webServer" without inject`
+  （栈顶 `dsh-client-connection/lib/index.js:618`），条目被回滚（profile package.json 不留该依赖）。
+- 根因（新版 DSH 回归）：`HostConnectionService.register()` 末行 `owner.effect(() => owner.webServer.register(route))`；
+  `rpc.handle` 的 owner 取 `this.ctx`——cordis 服务追踪构造的**影子 Context**（`createTraceable` / `createShadow`：
+  原型链是调用方 ctx，但 `symbols.shadow` 指向 connection 服务自身 ctx），因此 `owner.webServer` 的服务解析是
+  从 **connection 插件 fiber** 向上查找。旧版（0.1.0-rc.8 ~ 0.1.2-alpha.3）connection 插件自身 inject 含 webServer
+  （`["webServer", "credentials"]`），其 fiber.store 有 webServer → 正常；**0.1.5-alpha.1 把 connection 的 inject
+  改为 `["credentials"]`**（/api 路由改用 `ctx.inject(['webServer'], ...)` 挂载），connection fiber 的 store 不再有
+  webServer → 无论调用方 inject 什么，都必抛上述错误。**调用方声明 `inject: ['webServer']` 无效**——解析起点是
+  服务侧 fiber，不是调用方 fiber（已用真实 `HostConnectionService` + cordis 4.0.2 复现并验证）。
+- **修复**：`src/static/host.js` 改用 `connection.register(ctx, '/rpc', handler)`——与 `rpc.handle` 同一实现，但 owner
+  由调用方显式传入；传本插件自己的 ctx（inject 含 webServer，真实 ctx 无 shadow）即可解析。壳与 patch 均声明
+  `inject: ['connection', 'webServer']`。验证：0.1.5-alpha.1 与 0.1.2-alpha.3 语义下均注册 `prefix:/rpc`；把 inject 强制
+  回 `['connection']` 则精确复现原报错。
+- 备选修复（DSH 侧，恢复旧版行为；本插件不依赖）：web profile 的 `~/.dsh/profiles/web/cordis.patch.yml` 追加
+  `- id: connection` / `inject: [webRuntime, webServer]`。
+- 动态模式不受影响：`harness.handle` 不经 connection/webServer。
 
 ---
 
@@ -295,6 +316,7 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 | pkg-21 | **DSH 0.1.2-alpha.2 升级兼容性核查（无代码改动）**：升级（0.1.1-rc.2 → 0.1.2-alpha.2，08-30 发布）后动态插件随进程重启丢失（进程内存，已知行为，按 §8.1 重新部署即恢复）。逐项核对新版 API 全部兼容：动态内置符号（harness/host.call/styles/React）、槽位注册格式 `{name,id,order,label}` 与 props（useSessions/sessionId）、Host 服务（fs/agents/sessions/sessionPersistence/sandboxPolicy/systemPrompt）、事件（agent/created、agent/request）、`PromptSection {name,order,text}`、静态 `connection`/`/rpc` 通道（新版加浏览器 auth fence，外部 curl 401 属预期）、`__ModuleLoader__` 协议、`forceCleanSection` 安全网（运行时内部结构未变）。**角色分工确认：动态仅开发调试，正式使用走静态模式**。详见 todo.md §2.6 | ✅ 动态重新部署即恢复（2026-08-31，dshy-1/pkg-1）；静态 bundle 与已提交版本逐字节一致，无需重编译，重装仅刷新 profile 副本 |
 | pkg-22 | **修复静态 Client 在 DSH 0.1.2-alpha.2 下不激活（下拉框不渲染）**：根因 `package.json` 的 `dsh.client.inject` 在新版被当作 **cordis 服务等待列表**（boot 图插件条目的 inject），而旧值 `["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-slots"]` 指向**已不存在的包**（前者整个被移除；后者只是前端 require seed 模块、非服务）→ 条目永远 waiting → `apply` 永不执行。**修复**：`dsh.client.inject` 改为 `["slots", "connection"]`（与 `src/static/client.js` 的 `export const inject` 一致；`react` 由前端 seed 提供无需声明 external）。静态 Host 半区不受影响（patch 的 `inject: [connection]` 是真实服务，一直正常） | ⚠️ 该修复必要但**不充分**（见 pkg-23） |
 | pkg-23 | **修复静态 Client 不激活的真正根因：`export default apply`**。pkg-22 后下拉框仍不显示，深挖 loader（`cordis-plugin-loader`）`unwrapExports`：`exports = exports.default ?? exports`——bundle 若导出 `default`（= apply 函数），解包后 plugin = **裸函数**，`plugin.inject` 丢失。静态 Host 有 patch YAML 的 `inject: [connection]`（loader 合并条目 options inject）所以正常；静态 **Client** 条目由 kernel 按名字创建（`o.create({name})`，无 options inject），只靠 bundle 导出的 inject 等待 slots/connection——丢失后 apply 立即执行、`ctx.get('connection')` 尚为 undefined → **静默 return → 无下拉框**。参考 `dsh-custom-header` 的 bundle（只导出 `{apply, inject}`，无 default）。**修复**：删除 `src/static/{host,client}.js` 的 `export default apply`，只导出 `{name, inject, apply}` / `{inject, apply}`；已用 `unwrapExports` 逻辑模拟验证新旧形状 | ✅ 2026-08-31 修复；需重装 + 重启 web + 刷新页面生效 |
+| pkg-24 | **修复 DSH 0.1.5-alpha.1 静态挂载失败（`cannot get property "webServer" without inject`）**：根因新版把 connection 插件的 inject 由 `["webServer","credentials"]` 改为 `["credentials"]`（/api 路由改 `ctx.inject(['webServer'], ...)`），而 `connection.rpc.handle` 的 owner 是 cordis 影子 Context（`symbols.shadow` = connection 服务 ctx，解析从 connection fiber 向上），故调用方怎么 inject 都无效；`src/static/host.js` 改用 `connection.register(ctx, '/rpc', handler)` 显式传 owner，壳与 patch 声明 `inject: ['connection','webServer']`。用真实 `HostConnectionService` + cordis 4.0.2 复现验证（新旧两代语义均注册 `prefix:/rpc`） | ✅ 2026-09-09 修复；需重装 `dsh plugin --profile web add file:$(pwd)` + 重启 web |
 
 **仓库整理（非插件功能版本，2026-08-18）**：独立为 git 仓库 `dsh-scene`——源码落盘 `src/`、档案并入 `doc/prompts/`、
 `.deepseek.yaml` 与 `package.json` 随仓库管理，README 重构；双模式重构后删除旧的 `src/host.js`/`src/client.js`

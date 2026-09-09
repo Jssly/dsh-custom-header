@@ -4,9 +4,16 @@
 # 半区插入 web profile 的 loader。插件名与 package.json 的 name 一致。
 # 动态模式（开发）不经过本文件：直接 cordis_define + cordis_run。
 #
-# inject: [connection] —— RPC 通道依赖 connection 服务（dsh-client-connection
-# 提供）先就绪；不声明会静默退出（/rpc 通道 405 不注册）。
+# inject: [connection, webServer] —— connection 服务（dsh-client-connection 提供）
+# 先就绪才注册 /rpc 通道；webServer 是硬依赖：本插件用
+# connection.register(ctx, '/rpc', handler) 把 owner 显式指定为自己的 ctx，
+# register 内部执行 owner.effect(() => owner.webServer.register(route))，
+# 需要该 ctx 能解析 webServer。缺声明会抛
+# 「cannot get property "webServer" without inject」并回滚整个 loader entry。
+# （DSH 0.1.5-alpha.1 起 connection.rpc.handle 已不可用——它的 owner 是服务侧
+# 影子 Context，解析从 connection 插件 fiber 向上，调用方 inject 无效；
+# 详见 README §六-9 / todo.md §2.9。）
 - insert:
     - id: dsh-profile-selector
       name: dsh-profile-selector
-      inject: [connection]
+      inject: [connection, webServer]
