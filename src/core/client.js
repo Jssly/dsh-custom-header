@@ -50,6 +50,8 @@ export function clientCore(ctx, opts, deps) {
       : undefined
     const [profiles, setProfiles] = React.useState(null)
     const [active, setActive] = React.useState(null)
+    // 工作区级开场白覆盖（.deepseek.yaml → workspace.global_prompt）：仅用于 tooltip 提示
+    const [gp, setGp] = React.useState(null)
     const [tip, setTip] = React.useState(null)
     const [fatal, setFatal] = React.useState(null)
     const [error, setError] = React.useState(null)
@@ -58,6 +60,7 @@ export function clientCore(ctx, opts, deps) {
       call(opts.rpcPrefix + '.profiles', { sessionId, cwd }).then((r) => {
         if (!alive) return
         if (r && Array.isArray(r.profiles)) setProfiles(r.profiles)
+        if (r && typeof r.globalPrompt === 'string' && r.globalPrompt.length > 0) setGp(r.globalPrompt)
         if (r && r.error) setFatal(String(r.error))
         if (r && Array.isArray(r.profiles) && r.profiles.length === 0 && !r.error) setFatal('未找到 .deepseek.yaml 的 system_prompts')
       }).catch((err) => {
@@ -108,7 +111,7 @@ export function clientCore(ctx, opts, deps) {
       const temp = only.parameters && only.parameters.temperature != null ? only.parameters.temperature : null
       return React.createElement('span', { className: css + '-inline' },
         React.createElement('span', {
-          title: error || tip || 'profile-' + shownTitle + (temp != null ? ' · temperature ' + temp : ''),
+          title: error || tip || 'profile-' + shownTitle + (temp != null ? ' · temperature ' + temp : '') + (gp ? ' · 开场白覆盖: ' + gp : ''),
         }, 'profile-' + shownTitle),
         error ? React.createElement('span', { className: 'err', title: error }, error) : null
       )
@@ -121,8 +124,8 @@ export function clientCore(ctx, opts, deps) {
         value: shown,
         onChange,
         title: error || tip || (shownProfile && shownProfile.parameters && shownProfile.parameters.temperature != null
-          ? 'profile-' + shownTitle + ' · temperature ' + shownProfile.parameters.temperature
-          : '切换 .deepseek.yaml profile'),
+          ? 'profile-' + shownTitle + ' · temperature ' + shownProfile.parameters.temperature + (gp ? ' · 开场白覆盖: ' + gp : '')
+          : '切换 .deepseek.yaml profile' + (gp ? ' · 开场白覆盖: ' + gp : '')),
       },
         profiles.map((p) => React.createElement('option', { key: p.name, value: p.name }, 'profile-' + (p.title || p.name)))
       ),

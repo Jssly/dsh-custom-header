@@ -14,7 +14,7 @@
 > **状态**：✅ 已迁移为独立项目 `dsh-scene`（源码 + 提示词档案 + 工作区配置一体化管理，git 仓库管理，2026-08-18）
 > **版本说明**：Package 编号按插件实例计数，DSH 进程重启后重新从 pkg-1 计数（动态插件定义在进程内存，
 > 重启即丢，需重新部署——见 §8.1）；
-> 本仓库功能演进以「功能版本」为准（见 §七 版本历史，当前 = pkg-23：修复静态 Client 不激活的真正根因——`export default apply` 导致 loader `unwrapExports` 解包成裸函数、inject 丢失）。
+> 本仓库功能演进以「功能版本」为准（见 §七 版本历史，当前 = pkg-26：档案 `file` 支持**数组**（按序合并多文件提示词）+ `global_prompt` 未配置/文件缺失时**不再覆盖**）。
 > **档案约束**（属提示词档案内容，与插件逻辑无关）：客户不持有现货、不做备兑；标的=上证50ETF华夏（510050）。
 
 ---
@@ -31,13 +31,15 @@
 | `src/static/host.js` | 静态模式 Host 壳（ESM import 核心；`connection.rpc.handle` 适配） |
 | `src/static/client.js` | 静态模式 Client 壳（ESM import 核心；`connection.rpc.call` 适配） |
 | `build.mjs` | 双模式构建脚本（动态内联 → `dist/dynamic/`；静态 esbuild → `lib/`） |
+| `scripts/verify-offline.mjs` | **离线验证脚本**（零依赖，48 项：YAML 解析 / 多文件合并 / 开场白覆盖语义 / 回归；`node scripts/verify-offline.mjs`） |
 | `cordis.patch.yml` | 静态模式挂载层（`dsh plugin` 安装时插入 loader） |
 | `package.json` | 项目元信息（`dsh.bundle.patch` / `dsh.client` / `exports` / `build` 脚本） |
 | `dist/dynamic/{host,client}.js` | **构建产物**：动态函数体（cordis_define 用；勿手改） |
 | `lib/{index,client}.js` | **构建产物**：静态 bundle（勿手改） |
 | `doc/prompts/default.md` | 默认档案正文（期权分析角色；`{{date}}`、`{dataDir}`、`{fileDir}` 占位符） |
 | `doc/prompts/dev.md` | 开发档案正文（开发工程师角色；`{{date}}`、`{workspace}` 占位符） |
-| `.deepseek.yaml` | 工作区配置（`system_prompts` 源；被插件解析，含 `parameters.temperature`） |
+| `doc/prompts/global.md` | **工作区级开场白覆盖正文**（由 `.deepseek.yaml` → `workspace.global_prompt` 指向；用于**替换** DSH 默认开场白 `You are an AI agent powered by DeepSeek Harness.`，见 §六-10） |
+| `.deepseek.yaml` | 工作区配置（`system_prompts` 档案源 + `global_prompt` 开场白覆盖；被插件解析，含 `parameters.temperature`）。档案 `file` 可为**字符串或字符串数组**（数组=按序合并多个提示词文件）；`global_prompt` **缺失/文件不存在时不会被覆盖**（见 §六-10） |
 | `README.md` | 本文档（功能 + 开发说明 + 版本史 + 已知坑） |
 | `pnpm-workspace.yaml` | pnpm 构建策略（`allowBuilds: esbuild: true`，允许 esbuild 跑安装脚本） |
 | `.gitignore` | 忽略 `node_modules/`、`.pnpm-store/`、`.idea/` 等 |
@@ -64,8 +66,18 @@
    （`已切换: dev · temp 0.2`），**不渲染行内文字**（避免挤动布局导致下拉框错位）；仅失败渲染红色 `.err`。
 5. **持久性**：档案状态存于 Host 内存 `active` Map（sessionId → 档案），刷新页面不丢（激活的是同一 Host 进程）；
    DSH 重启后需重新激活（新会话打开时自动加载 default）。
-6. **注入内容**：`【当前会话已通过界面选择 .deepseek.yaml 提示词档案「<name>」，以下为该档案的完整指令，请以其中的角色设定与任务要求为准执行】\n\n<档案正文>`，
-   占位符替换规则见 §五。
+6. **注入内容**：`【当前会话已通过界面选择 .deepseek.yaml 提示词档案「<name>」，以下为该档案的完整指令，请以其中的角色设定与任务要求为准执行】\n\n<档案正文>`；
+   档案 `file` 可以是**单一路径或路径数组**——数组时按**声明顺序**逐个读盘，用空行（`\n\n`）依次拼接为一段正文，
+   前置说明头只加一次；任一文件读不到即**整体失败**（红字报错，不注入「半个档案」）。占位符替换规则见 §五。
+7. **工作区级开场白覆盖（`workspace.global_prompt`）**：把 `.deepseek.yaml` 的
+   `workspace.global_prompt` 指向的文件正文，注册为**同名 section `harness:identity`**（agent 作用域），
+   从而**完全替换** DSH 自带的第一方开场白 `You are an AI agent powered by DeepSeek Harness.`
+   ——用于消除该英文自我介绍导致的「AI 默认用英文思考」问题。
+   - 与档案选择**解耦**：不依赖下拉框，`agent/created` 时对每个会话自动生效；
+   - 配置示例：`workspace: { global_prompt: doc/prompts/global.md }`（路径相对**会话 cwd**，与档案 `file` 规则一致）；
+   - **未配置（键缺失 / 值非字符串 / 空值）/ 文件不存在 / 文件为空 → 一律「不覆盖」**：先卸载已有覆盖
+     （`disposer` + `forceCleanSection` 兜底，见 §六-10），再保留 DSH 默认开场白（只记 warn，不阻断会话创建）；
+   - 生效确认：下拉框悬停 title 追加 `· 开场白覆盖: <file>`；`.state` RPC 返回 `globalPrompt` 字段。
 
 ---
 
@@ -139,9 +151,9 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 
 | handler | 入参 | 返回 | 说明 |
 |---|---|---|---|
-| `dshprofile.profiles` | `{sessionId, cwd?}` | `{profiles:[{name,title,file,parameters}], cwd}` 或 `{profiles:[], error}` | 解析工作区 `.deepseek.yaml` 的 `system_prompts`；`name`=档案 key，`title`=档案可选 `name` 字段（缺省=key，下拉框显示用）；cwd 解析顺序：① 客户端显式传入的 `args.cwd`（来自会话 store，最可靠）→ ② Host 缓存 → ③ `agents.get(sessionId).session.header.cwd`；解析不到返回 `cwd:null` + 明确错误，**不回退** `sandboxPolicy.workspaceRoot`（见 §六-7） |
-| `dshprofile.state` | `{sessionId}` | `{active: profileName\|null}` | 当前会话激活的档案（Host 内存态） |
-| `dshprofile.activate` | `{sessionId, profile, cwd?}` | `{ok, profile, temperature?, cleaned?}` 或 `{ok:false, error}` | 切换档案；错误信息带 `[diag: ...]` 诊断段（见 §六-4） |
+| `dshprofile.profiles` | `{sessionId, cwd?}` | `{profiles:[{name,title,file,files,parameters}], globalPrompt, cwd}` 或 `{profiles:[], globalPrompt:null, error}` | 解析工作区 `.deepseek.yaml` 的 `system_prompts`（与 `global_prompt`，同一 `loadWorkspace()` 入口一次解析）；`name`=档案 key，`title`=档案可选 `name` 字段（缺省=key，下拉框显示用）；`files`=规范化后的路径数组（**即多文件合并顺序**），`file` 向后兼容（单文件=字符串 / 多文件=数组）；`globalPrompt`=开场白覆盖文件路径（null=未配置或配置无效）；cwd 解析顺序：① 客户端显式传入的 `args.cwd`（来自会话 store，最可靠）→ ② Host 缓存 → ③ `agents.get(sessionId).session.header.cwd`；解析不到返回 `cwd:null` + 明确错误，**不回退** `sandboxPolicy.workspaceRoot`（见 §六-7） |
+| `dshprofile.state` | `{sessionId}` | `{active: profileName\|null, globalPrompt: filePath\|null}` | 当前会话激活的档案 + 实际生效的开场白覆盖文件（Host 内存态 `active` / `identity` 两张 Map） |
+| `dshprofile.activate` | `{sessionId, profile, cwd?}` | `{ok, profile, temperature?, cleaned?, globalPrompt?}` 或 `{ok:false, error}` | 切换档案；**同时重读 `global_prompt`**（用户改完 `.deepseek.yaml` 无需重启 DSH）；错误信息带 `[diag: ...]` 诊断段（见 §六-4）；档案 `file` 为数组时按声明顺序合并多文件正文，任一文件缺失 → `{ok:false, error}`（错误含「第 i/n 个 + 文件名」） |
 
 **RPC 通道差异**（核心代码不感知，由壳适配）：
 - 动态：`harness.handle(method, handler)` 直接注册；handler 返回业务结果；Client `host.call(method, args)` 直接拿结果。
@@ -151,26 +163,33 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 
 **激活流程（dshprofile.activate 内部）**：
 1. `enqueue(sessionId, fn)` 入会话级串行队列（同一会话的激活严格顺序执行）；
-2. 幂等短路：`active.get(sessionId).profileName === name` → 直接返回，不重注册；
-3. 有旧档案 → `disposer()` + `disposeTemp()`，并从 `active` 删除；
-4. 读 `.deepseek.yaml`（迷你 YAML 解析，仅支持 map/list of scalars）→ 找档案 → 读档案文件
-   （档案 `file` 为**相对会话 cwd 的路径**，`fs.resolve(profile.file, { cwd })`，如 `doc/prompts/default.md`）；
-5. 替换占位符（见 §五）→ `profileText()` 生成注入正文；
-6. `forceCleanSection(sp, agent)` 强制清除残留 section（见 §六-3）；
-7. `sp.section({name:'dsh-profile:profile', order:-50, text})` 注册（`sp = agent.ctx.systemPrompt`）；
-8. 档案 `parameters.temperature`（数字）→ `agent.ctx.on('agent/request', ...)` 瀑布注入（见 §六-5）；
-9. `active.set(sessionId, {...})` 记录 `{profileName, disposer, disposeTemp, temperature, sp, agent}`。
+2. **先重读开场白覆盖**：`applyIdentity(agent, sessionId, cwd)` —— 读 `.deepseek.yaml` 的 `workspace.global_prompt`，
+   卸载旧注册后重注册 `harness:identity`（见 §六-10）；
+3. 幂等短路：`active.get(sessionId).profileName === name` → 直接返回，不重注册；
+4. 有旧档案 → `disposer()` + `disposeTemp()`，并从 `active` 删除；
+5. 读 `.deepseek.yaml`（`loadWorkspace()`：迷你 YAML 解析，支持 map / 标量 / **标量列表**）→ 找档案 →
+   读档案文件（档案 `files` 为**相对会话 cwd 的路径数组**，逐个 `fs.resolve(rel, { cwd })`，
+   如 `doc/prompts/default.md`；单文件档案等价于长度 1 的数组；`file` 兼容旧写法）；
+6. 替换占位符（见 §五）→ `profileText()` 生成注入正文；
+7. `forceCleanSection(sp, agent, SECTION_NAME)` 强制清除残留 section（见 §六-3）；
+8. `sp.section({name:'dsh-profile:profile', order:-50, text})` 注册（`sp = agent.ctx.systemPrompt`）；
+9. 档案 `parameters.temperature`（数字）→ `agent.ctx.on('agent/request', ...)` 瀑布注入（见 §六-5）；
+10. `active.set(sessionId, {...})` 记录 `{profileName, disposer, disposeTemp, temperature, sp, agent}`。
 
 **YAML 解析能力边界**（迷你解析器，勿超纲使用）：
-- 仅支持 `key: value` / `key:`（嵌套 map，缩进栈）/ 列表暂不支持复杂结构；
-- 标量：字符串（去引号）、布尔、数字、null；`#` 注释行忽略；
-- 足够解析 `.deepseek.yaml` 的 `workspace.system_prompts.<name>.file|parameters.temperature` 结构。
+- 支持 `key: value`（标量）/ `key:`（嵌套 map，缩进栈）/ `- item`（**标量列表**，即 `file` 的多文件写法）；
+- 标量：字符串（去引号）、布尔、数字、null；`#` 注释行与空行忽略；无法识别的行按「忽略」处理，**不抛错**；
+- 列表实现（pkg-26）：`key:` 空值先懒创建占位对象，若该层首个内容行是 `- item` 就**原地升级为数组**。
+  此前 `- item` 行被直接丢弃 → `file:` 数组被解析成 `{}` → 整个档案被 `typeof file === 'string'` 过滤掉；
+- 不支持：锚点、多行字符串（`|` / `>`）、嵌套列表、列表内 map；
+- 足够解析 `.deepseek.yaml` 的 `workspace.system_prompts.<name>.file|parameters.temperature` 与
+  `workspace.global_prompt` 结构。
 
 ---
 
 ## 五、占位符替换规则
 
-激活时对档案正文做如下替换（cwd = 会话工作区）：
+激活时对**档案正文**与 **`global_prompt` 覆盖正文**做如下替换（cwd = 会话工作区）：
 
 | 占位符 | 替换为 |
 |---|---|
@@ -178,6 +197,9 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 | `{workspace}` | 会话 cwd |
 | `{dataDir}` | `cwd/output` |
 | `{fileDir}` | `cwd/doc/ai` |
+
+> **多文件档案（`file` 为数组）**：每个文件**各自**做上表替换，再按 `file` 的**声明顺序**用空行（`\n\n`）
+> 依次拼接；前置说明头只加一次。任一文件读不到 → 整个档案激活失败（红字），不会静默注入残缺正文。
 
 > 注意：档案正文（`doc/prompts/*.md`）中的 `F:\git\node\optionData\...` 字样是编写档案时的示例绝对路径，
 > 激活时只做上表占位符替换，**示例路径不会被改写**。若档案要引用会话工作区内的目录（如 `doc/ai`、`output`），
@@ -204,9 +226,12 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 - 症状：已串行+幂等（pkg-10）仍报 "already registered"。
 - 根因：`sp.section()` 返回的 disposer 在真实运行时（traceable 影子上下文路径）调用后**并未真正移除注册**
   （单测用裸 `createScope`+`ScopedLayers` 复现不出，机制疑在影子 ctx 的 effect 归属）；旧注册残留 → 下次 `section()` 撞名。
-- **修复（安全网）**：`forceCleanSection(sp, agent)` —— 直接遍历 `sp.layers.scoped`（scope key === agent 的层）
-  与 `sp.layers.global`，把 `layer.sections.data`（普通 Map）里的 `SECTION_NAME` 直接 `delete`。
+- **修复（安全网）**：`forceCleanSection(sp, agent, name?)` —— 直接遍历 `sp.layers.scoped`（scope key === agent 的层）
+  与 `sp.layers.global`，把 `layer.sections.data`（普通 Map）里的目标 section 名直接 `delete`。
   注册前与插件 `ctx.on('dispose')` 时都执行。**这是当前唯一可靠的移除手段，请保留**。
+  - `name` 省略时清理本插件自己的档案 section（`SECTION_NAME`）；
+  - ⚠️ 当 `name === 'harness:identity'` 时**跳过 global 层清扫**（§六-10）：那份是 DSH 自带开场白，
+    删掉会波及所有工作区；替换只允许走 scoped shadow。
 
 ### 4. 诊断探针
 - activate 出错时错误信息追加 `[diag: scopedHits=?; agentKeyHit=?; globalHit=?]`——
@@ -246,8 +271,10 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
   查询失败按存在处理——宁可延迟也不误报红字）：
   - 会话存在 → 暂存 `pending` Map（sessionId → {profile, cwd}），返回 `{ok:true, profile, pending:true, temperature:null}`；
   - 会话确实不存在 → 才返回 `{ok:false, error:'会话不存在或未激活'}`。
-- **自动应用**：`ctx.on('agent/created', ({agent}) => ...)` 监听 agent 发布（`agent.id === sessionId` 为 pending 键），
+- **自动应用**：`ctx.on('agent/created', async ({agent}) => ...)` 监听 agent 发布（`agent.id === sessionId` 为 pending 键），
   经 `enqueue` 串行调用共享的 `applyActivation()` 注册 section——保证在首次模型调用前注入。
+  **pkg-25 起该监听器承担两件事**：① 无条件执行工作区开场白覆盖 `applyIdentity()`（见 §六-10，与 pending 无关）；
+  ② 命中 `pending` 时再 `enqueue` 应用排队档案。事件经 `ctx.serial` 串行派发并 `await`，故监听器内可安全 await 读盘。
 - 配套：`.state` 把 pending 档案也算当前选中（下拉框不跳回默认）；Client 对 `pending:true` 显示
   「已排队(会话激活后生效)」提示而非红字；`dispose` 时清空 pending。
 - 注意：`agent/created` 是 scoped emit（`this: Scoped<Agent>`），监听器必须用 `agent.id`（=== session.id）查 pending。
@@ -284,12 +311,59 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
   `- id: connection` / `inject: [webRuntime, webServer]`。
 - 动态模式不受影响：`harness.handle` 不经 connection/webServer。
 
+### 10. 工作区开场白覆盖 `harness:identity`（2026-09-15 新增）
+
+**目标**：把 DSH 第一方开场白 `You are an AI agent powered by DeepSeek Harness.` 换成工作区自备的文件内容
+（典型用途：强制中文思考）。DSH 只提供 `includeHarnessIdentity: boolean` 开关（整体开关），**没有改文本的入口**，
+本插件也不修改 DSH 源码。
+
+- **DSH 侧事实**：该开场白由 `@deepseek-ai/dsh-system-prompt` 构造函数以**全局作用域**注册：
+  `section({ name: 'harness:identity', order: -1000, text: 'You are an AI agent powered by DeepSeek Harness.' })`
+  （`packages/core/system-prompt/src/index.ts:426`；`SECTION_ORDERS.HARNESS_IDENTITY = -1000`）。
+- **覆盖原理（无需改 DSH）**：`dsh-scope` 的 `ScopedLayers.merge()` 先取 global 层条目，再用 scope-chain 的**同名**条目覆盖
+  （`packages/core/scope/src/store.ts:208`），`SystemPrompt.assemble()` 正是用它（`:576`）。
+  因此在本插件已用的 **agent 作用域**注册**同名** `harness:identity`，即可只替换这一句：
+  - 全局层那份**永不改动** → 其他工作区/其他会话不受影响；
+  - 作用域语义与档案 section 完全一致（§六-1），无需新增任何机制。
+- **生效时机**：`ctx.on('agent/created', ...)`（该事件经 `ctx.serial` 串行派发并 `await`，可安全 await 读盘），
+  **与下拉框选档案解耦** —— 新建会话 / 冷恢复 / DSH 重启后重连 / `compact` / `clear` 换 agent 对象时都会执行；
+  切档案（`.activate`）时额外重读一次，便于改完 `.deepseek.yaml` 免重启生效。
+- **幂等与清理**：`identity` Map（sessionId → `{disposer, sp, agent, file}`）；`unapplyIdentity()` 负责
+  「dispose 旧注册 → `forceCleanSection(sp, agent, IDENTITY_SECTION)` 兜底 → 从 Map 删除」，
+  成功路径**注册前**与**「不覆盖」路径**（未配置 / 文件不存在 / 文件为空）都调用它。
+- ⚠️ **`forceCleanSection` 新增 `name` 参数，且对 `harness:identity` 禁用 global 层清扫**：
+  global 层那份是 DSH 自带开场白，直接 `delete` 会波及**所有**工作区（见 §六-3 的清扫范围说明）。
+  这是本次改动最容易踩的坑。
+- **失败策略：绝不抛出**（否则会阻断会话创建）。未配置（键缺失 / 值非字符串 / 空值）/ 文件不存在 /
+  文件为空 / 无 systemPrompt 服务 → 一律保留 DSH 默认开场白，只 `warn` 一条带文件名的日志。
+  **空文件视为未配置**——否则 system prompt 首段会整段消失。
+- ⚠️ **「不覆盖」必须主动卸载（pkg-26 修复）**：上述失败分支以前只调 `prev.disposer()` 就返回，而 disposer
+  在真实运行时可能静默失效（§六-3）→ 旧的 `harness:identity` 残留在 agent 作用域**继续覆盖**，
+  表现为「`.deepseek.yaml` 里已经没有 `global_prompt`（或文件已删），开场白却还是被改了」的状态不一致。
+  现统一走 `unapplyIdentity()`（`disposer()` + `forceCleanSection` 双保险）后再返回 `applied:false`；
+  成功路径同样先卸载再注册（幂等，compact/clear 换 agent 对象亦安全）。
+  清扫范围不变：`harness:identity` **只清该 agent 的 scoped 层**，global 层那份 DSH 自带开场白永远不动。
+- **DSH-Think-zh 的关系**：该第三方插件走「在 persona 之后新增一个语言指令 section（order 2）」的注入路线，
+  与本功能的「替换开场白」路线不同，二者可共存（section 名不同，互不覆盖）。
+  本工作区 `doc/prompts/global.md` 的内容即等价于该插件的默认注入文本。
+  > 排查记录（2026-09-15）：`/mnt/f/git/github/DSH-Think-zh` 的代码本身正确
+  > （`inject: ['systemPrompt']` + `section()` 写法无误），**未生效的真因是它没被装进 profile**——
+  > `~/.dsh/profiles/web/package.json` 的 `dependencies` 与 `dsh.profile.bundles` 里都查无 `dsh-think-zh`，
+  > 即从未被加载。需要的话按 §8.2 用 `dsh plugin --profile web add github:Len7183/DSH-Think-zh` 安装。
+- **验证手段**：
+  - 下拉框悬停 title 尾部 `· 开场白覆盖: doc/prompts/global.md`；`.state` RPC 的 `globalPrompt` 字段；
+  - 观察会话 system prompt：首段应为 `doc/prompts/global.md` 正文，且不再出现 `You are an AI agent powered by DeepSeek Harness.`；
+  - 离线验证脚本 `scripts/verify-offline.mjs`（**48 项**，无需 DSH 运行时）：mock `ctx.get('fs'|'agents')` +
+    捕获 `agent/created` 监听器，断言注册的 section 名/order/文本、多文件合并顺序、失败分支不抛异常、
+    compact 重注册不撞名、global 层未被破坏，以及**「未配置 / 文件被删 / 文件被清空 → scoped 层无残留」**
+    （用 `brokenDisposer` 复现 disposer 失效；反向对照：去掉 `forceCleanSection` 兜底则该 4 项失败）。
+
 ---
 
 ## 七、版本历史
 
 > **编号说明**：原插件实例按 Package 编号演进至 pkg-12（run-10）。DSH 进程重启 / 新 AI 会话重新定义后，
-> Package 编号重新从 pkg-1 计数——本仓库「功能版本」沿用原编号（当前功能版本 = pkg-19：延迟激活修复），
+> Package 编号重新从 pkg-1 计数——本仓库「功能版本」沿用原编号（当前功能版本 = pkg-25：工作区开场白覆盖），
 > 每次会话实际定义的 Package 编号见 `cordis_inspect_self dshy-1`（pluginId 为 Host 分配，不可改）。
 > 例如本会话（2026-08-18 第二次）DSH 重启后动态插件丢失，重新定义为 dshy-1/pkg-1（run-1），
 > profile 文案更新为 dshy-1/pkg-2（run-2），功能等价于本表的 pkg-16。
@@ -317,6 +391,8 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 | pkg-22 | **修复静态 Client 在 DSH 0.1.2-alpha.2 下不激活（下拉框不渲染）**：根因 `package.json` 的 `dsh.client.inject` 在新版被当作 **cordis 服务等待列表**（boot 图插件条目的 inject），而旧值 `["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-slots"]` 指向**已不存在的包**（前者整个被移除；后者只是前端 require seed 模块、非服务）→ 条目永远 waiting → `apply` 永不执行。**修复**：`dsh.client.inject` 改为 `["slots", "connection"]`（与 `src/static/client.js` 的 `export const inject` 一致；`react` 由前端 seed 提供无需声明 external）。静态 Host 半区不受影响（patch 的 `inject: [connection]` 是真实服务，一直正常） | ⚠️ 该修复必要但**不充分**（见 pkg-23） |
 | pkg-23 | **修复静态 Client 不激活的真正根因：`export default apply`**。pkg-22 后下拉框仍不显示，深挖 loader（`cordis-plugin-loader`）`unwrapExports`：`exports = exports.default ?? exports`——bundle 若导出 `default`（= apply 函数），解包后 plugin = **裸函数**，`plugin.inject` 丢失。静态 Host 有 patch YAML 的 `inject: [connection]`（loader 合并条目 options inject）所以正常；静态 **Client** 条目由 kernel 按名字创建（`o.create({name})`，无 options inject），只靠 bundle 导出的 inject 等待 slots/connection——丢失后 apply 立即执行、`ctx.get('connection')` 尚为 undefined → **静默 return → 无下拉框**。参考 `dsh-custom-header` 的 bundle（只导出 `{apply, inject}`，无 default）。**修复**：删除 `src/static/{host,client}.js` 的 `export default apply`，只导出 `{name, inject, apply}` / `{inject, apply}`；已用 `unwrapExports` 逻辑模拟验证新旧形状 | ✅ 2026-08-31 修复；需重装 + 重启 web + 刷新页面生效 |
 | pkg-24 | **修复 DSH 0.1.5-alpha.1 静态挂载失败（`cannot get property "webServer" without inject`）**：根因新版把 connection 插件的 inject 由 `["webServer","credentials"]` 改为 `["credentials"]`（/api 路由改 `ctx.inject(['webServer'], ...)`），而 `connection.rpc.handle` 的 owner 是 cordis 影子 Context（`symbols.shadow` = connection 服务 ctx，解析从 connection fiber 向上），故调用方怎么 inject 都无效；`src/static/host.js` 改用 `connection.register(ctx, '/rpc', handler)` 显式传 owner，壳与 patch 声明 `inject: ['connection','webServer']`。用真实 `HostConnectionService` + cordis 4.0.2 复现验证（新旧两代语义均注册 `prefix:/rpc`） | ✅ 2026-09-09 修复；需重装 `dsh plugin --profile web add file:$(pwd)` + 重启 web |
+| pkg-25 | **工作区级开场白覆盖 `workspace.global_prompt`（2026-09-15 新增）**：以同名 section `harness:identity`（order −1000）注册进 agent 作用域，按名 shadow 掉 DSH 第一方开场白 `You are an AI agent powered by DeepSeek Harness.`（`dsh-scope` 的 `ScopedLayers.merge` 语义），用于消除英文自我介绍导致的中文用户「默认英文思考」。要点：① `loadProfiles()` 重构为 `loadWorkspace()`（档案 + `global_prompt` 一次解析）；② `applyIdentity()` 随 `agent/created` 对每个会话自动执行，与档案选择解耦；③ 切档案时重读（免重启）；④ 失败绝不抛出、空文件视为未配置 → 保留 DSH 默认；⑤ ⚠️ `forceCleanSection` 加 `name` 参数且对 `harness:identity` **禁用 global 层清扫**（否则会波及所有工作区）；⑥ `.profiles`/`.state`/`.activate` 返回 `globalPrompt` 诊断字段；⑦ Client 下拉框 tooltip 追加「开场白覆盖: `<file>`」。详见 §六-10 | ✅ 离线验证 16/16 通过（mock ctx + 捕获 `agent/created`）；已重装 `file:` 副本（md5 与新建构建一致）；**需重启 `dsh web` 生效** |
+| pkg-26 | **档案 `file` 支持数组 + `global_prompt` 未配置/文件缺失时不再覆盖（2026-09-15 新增）**：① 迷你 YAML 解析器补上**标量列表**（block sequence；`key:` 空值占位在首个 `- item` 时就地升级为数组）——此前 `- item` 行被丢弃，`file:` 数组解析成 `{}` → 整个档案被 `typeof file === 'string'` 过滤掉，**数组档案根本不出现在下拉框**；② `loadWorkspace()` 用 `normalizeFiles()` 规范化 `string \| string[]`（顺序保留、空串/非字符串项忽略、无有效文件即剔除档案），档案对象新增 `files`（恒为数组=合并顺序），`file` 保持向后兼容（单文件=字符串 / 多文件=数组）；③ `profileText()` 按 `files` 顺序逐个读盘 + 占位符替换，用**空行**合并为一段正文，任一文件失败**整体失败**（错误带「档案名 + 第 i/n 个 + 文件名」）；④ `applyIdentity()` 重写并抽出 `unapplyIdentity()`（disposer + `forceCleanSection` 兜底），**未配置（键缺失/非字符串/空值）/ 文件不存在 / 文件为空 四条路径一律先卸载旧覆盖再返回 `applied:false`**，修掉「配置已删、覆盖仍在」（disposer 静默失效导致）的状态不一致；⑤ 新增 `scripts/verify-offline.mjs`（48 项断言 + 反向对照）。详见 §二-6/7、§四、§五、§六-10 | ✅ 离线验证 48/48 通过；反向对照（去掉兜底）精确复现 4 项失败（2026-09-15）；需重建 `lib/` + 同步 profile 副本 + 重启 `dsh web` 生效 |
 
 **仓库整理（非插件功能版本，2026-08-18）**：独立为 git 仓库 `dsh-scene`——源码落盘 `src/`、档案并入 `doc/prompts/`、
 `.deepseek.yaml` 与 `package.json` 随仓库管理，README 重构；双模式重构后删除旧的 `src/host.js`/`src/client.js`
@@ -326,6 +402,9 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 ---
 
 ## 八、如何部署（下次 AI 会话操作手册）
+
+> **离线自检（无需 DSH 运行时）**：改完 `src/core/` 先跑 `node scripts/verify-offline.mjs`（48 项：YAML 解析 /
+> 多文件档案合并 / 开场白覆盖语义 / 既有行为回归），全过再构建；改解析器或覆盖逻辑时请连同该脚本一起维护。
 
 ### 8.1 开发模式（动态插件，默认）
 
@@ -382,6 +461,11 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 > 同步方式（任选）：① 重装 `dsh plugin --profile web add file:$(pwd)`（先 remove 更稳）；
 > ② 手动 `cp -r` 覆盖 profile 拷贝（lib/、dist/、src/、cordis.patch.yml、package.json）；
 > ③ 长期方案：改用 `link:` 或 symlink 依赖。同步后仍需重启 web 生效。
+>
+> **刷新后务必校验**（实测 2026-09-15）：不带 `remove` 直接 `add` 也能刷新成功，但要确认真的换成了新拷贝——
+> `md5sum lib/index.js "$(readlink -f ~/.dsh/profiles/web/node_modules/dsh-profile-selector)/lib/index.js"`
+> 两值必须一致（`lib/client.js` 同理）；不一致说明 profile 里还是旧构建，重启 web 也是旧行为。
+> 注意跨文件系统（`/mnt/f` 到 `~/.dsh`）pnpm 无法硬链接，只能整包拷贝。
 
 ### 8.3 双模式共存注意
 
@@ -408,10 +492,11 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 ## 九、数据流与安全边界
 
 - **读**：`fs.resolve/readText`（受 sandbox 约束；当前会话 policy=workspace-write，可读写工作区内的文件）；
-  仅读 `.deepseek.yaml` 与其 `file` 指向的档案文件（`doc/prompts/`），不触碰其他数据。
+  仅读 `.deepseek.yaml` 与其 `file` / `global_prompt` 指向的提示词文件（`doc/prompts/`），不触碰其他数据。
 - **写**：插件本身**不写盘**（激活状态在内存）；本仓库文件由开发期落盘维护。
 - **作用域**：注入只影响发起激活的会话（agent 作用域 section + 该会话 `agent/request` 监听）；
-  其他会话不受影响。
+  其他会话不受影响。开场白覆盖同理——`harness:identity` 只在该工作区会话的 agent 作用域内注册，
+  **不修改 DSH 全局层**，故其他工作区/其他会话仍用 DSH 默认开场白（见 §六-10）。
 - **静态模式权限**：`connection.rpc.handle('/rpc', ..., {authority:'loopback'})` 仅接受 loopback 来源
   （`isTrustedApiRequest` 校验，非 loopback 返回 403）；静态 bundle 由 web profile 的 `dsh.client` 声明收录，
   仅服务本机 GUI 页面。
