@@ -37,8 +37,18 @@ export const settingsViewSchema = z.object({
   defaults: z.record(z.string(), z.unknown()),
 }).passthrough()
 
+// Strict codecs carry BOTH shapes across the DSH 0.1.6-alpha.2 typert change
+// ("materialize generated schemas on first use"):
+//   - `create()` — required by 0.1.6-alpha.2+, whose registry rejects any
+//     strict codec without a factory and materializes the schema on first use.
+//   - `schema`   — required by earlier releases, which validated and parsed
+//     `codec.schema` directly.
+// A codec missing `create` is refused at both boundaries — `ctx.typert.register()`
+// on the host and `ctx.remote.$mount()` on the client — which leaves the settings
+// tab with no Remote face (the "host side not loaded" notice). The factory returns
+// this realm's single schema instance, which is exactly what the registry caches.
 function codec(typeSymbol: string, schema: z.ZodType): InvocationDescriptor['parameters'][number]['codec'] {
-  return { mode: 'strict', typeSymbol, schema }
+  return { mode: 'strict', typeSymbol, schema, create: () => schema }
 }
 
 function param(schema: z.ZodType, typeSymbol: string): InvocationDescriptor['parameters'] {
@@ -64,7 +74,7 @@ function descriptor(
     method,
     invocation: { kind: 'direct' },
     parameters: param(payloadSchema, payloadTypeSymbol),
-    result: { mode: 'strict', typeSymbol: resultTypeSymbol, schema: resultSchema },
+    result: codec(resultTypeSymbol, resultSchema),
   }
 }
 

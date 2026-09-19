@@ -12,12 +12,21 @@ export type RemoteResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: { code: string; message: string; details: object } }
 
+/**
+ * Strict codec across the 0.1.6-alpha.2 typert change: `create()` is the
+ * factory shape this release validates, `schema` is the pre-0.1.6-alpha.2
+ * shape. Hand-written descriptors carry both so one build serves either.
+ */
+export type StrictCodec =
+  | { readonly mode: 'strict'; readonly typeSymbol: string; readonly create: () => ZodType }
+  | { readonly mode: 'strict'; readonly typeSymbol: string; readonly schema: ZodType }
+
 /** One strict wire parameter codec. */
 export interface InvocationParameter {
   readonly name: string
   readonly wire: string
   readonly source: 'json'
-  readonly codec: { mode: 'strict'; typeSymbol: string; schema: ZodType }
+  readonly codec: StrictCodec
 }
 
 /** One strict wire endpoint descriptor. */
@@ -28,7 +37,7 @@ export interface InvocationDescriptor {
   readonly method: string
   readonly invocation: { kind: 'direct' }
   readonly parameters: readonly InvocationParameter[]
-  readonly result: { mode: 'strict'; typeSymbol: string; schema: ZodType }
+  readonly result: StrictCodec
 }
 
 /** Client contribution handed to `ctx.remote.$mount`. */

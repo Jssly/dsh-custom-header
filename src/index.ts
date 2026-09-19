@@ -304,5 +304,9 @@ export { createUrlRewriteMiddleware, type UrlRewriteTarget } from './url-rewrite
 export { createHeaderStripMiddleware, createHeaderInjectMiddleware } from './header-inject.ts'
 export { createBodyPatchMiddleware } from './body-patch.ts'
 export { requestSessionContext, sessionKeyOf } from './session-context.ts'
+// The shared wire contract, exported so the Typert codec shape can be
+// regression-tested against the installed DSH release (tests/contract.mjs).
+export { CUSTOM_HEADER_INVOCATIONS, settingsGetPayloadSchema, settingsSetPayloadSchema, settingsViewSchema } from './contract.ts'
+export type { CustomHeaderSettingsView } from './contract.ts'
 
 export default apply

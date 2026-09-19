@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.4（2026-09-19）
+
+- **修复 DSH 0.1.6-alpha.2 设置页报错**：「设置不可用（宿主侧未加载？）
+  —— 显示默认值。」
+  - 根因：DSH 0.1.6-alpha.2 的 typert 改为「首次使用时实例化 schema」
+    （`chore(typert): materialize generated schemas on first use`）。strict
+    codec 由 `schema` 字段改为 `create()` 工厂，registry 在校验时要求
+    `typeof codec.create === 'function'`。
+  - 影响：`ctx.typert.register()`（host manifest）与
+    `ctx.remote.$mount()`（client contribution）双双被拒 —— 命名空间
+    `customHeader` 未挂载，设置页拿不到 Remote face，于是显示该提示并且
+    只有默认值。
+  - 修复：`src/contract.ts` 的 strict codec 同时携带两种形态 ——
+    `create: () => schema`（0.1.6-alpha.2+ 必需）与 `schema`（旧版本直接
+    校验 `codec.schema.parse`），一份产物兼容两个版本。
+- 新增 `tests/contract.mjs`（`npm test`）：钉住 codec 的
+  `create()` / `schema` 双形态，防止该回归再次出现。
+- `src/index.ts` 导出共享 wire contract（`CUSTOM_HEADER_INVOCATIONS` 等）
+  供契约测试使用。
+
 ## 0.1.0 (2026-08-15)
 
 - 首个版本：`dsh-custom-header` —— DeepSeek Harness 网关客户端签名
