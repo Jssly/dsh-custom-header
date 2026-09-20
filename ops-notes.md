@@ -1,83 +1,57 @@
-# TODO / 待办与调研备忘
+# 运维备忘 / 已知特性与排查记录
 
-> 本文件记录未完成的功能讨论、调研结论与运维备忘，供后续会话快速接续。
-> 功能版本演进见 `README.md` §七；本文件按主题追加，不按版本号。
-
----
-
-## 1. Toast 反馈效果（讨论中，未实现）— 2026-08-18
-
-### 需求
-切换 profile 时加一个 Toast 效果（用户提出，明确"先讨论、暂不实现"）。
-
-### 现状
-切换反馈目前只显示在 select 悬停 title（tooltip）：`已切换: dev · temp 0.2`。
-这是有意的设计——工具行槽位有单行高度预算，行内文字会挤动布局导致下拉框错位（此前踩过坑，见 README §二-4 / §六-6）。
-
-### 调研结论（2026-08-18，Inspect 实测）
-1. **DSH 无现成 toast 服务**：
-   - Client 端 Service 目录：`layout / locale / sessions / slots / theme / timer / workspaces` —— 无 notification/toast/snackbar。
-   - Host 端 Service 目录（几十个服务）—— 同样无通知类服务。
-   - 结论：不能"直接调用现成 toast API"。
-2. **但有现成承载槽位 `shell.overlay`**：
-   - `shell.overlay`（list, scope root, replaceRisk: none）—— "Frame-wide floating layer, above every column and outside their scroll containers"。
-   - 框架级浮动层，在所有列之上、滚动容器之外，正是 toast 该待的位置；比自绘 `position: fixed` 更规范（不脱离 DSH 渲染树）。
-
-### 拟定实现思路（未编码）
-```
-conversation.input.left/right（现有下拉框）
-  ProfileSelect 切换成功/失败
-        │ emit('profile:switched', msg)
-        ▼
-模块级事件总线（src/core/client.js 内一个 Set<listener> + emit/subscribe，零依赖）
-        ▼
-shell.overlay（新注册 toast 组件，常驻，无消息渲染 null）
-  显示「已切换: dev · temp 0.2」→ 2.5s 淡出
-```
-- 双模式共用同一份核心代码（src/core/client.js），无需新增服务。
-- 样式复用 `--dsw-alias-*` CSS 变量，右下角浮出，不占工具行高度。
-- 与现有 title 提示可并存（title 兜底 + toast 增强）。
-
-### 待用户定夺
-- [ ] 位置：右下角（常见）还是输入栏上方？
-- [ ] 时长：2.5s 自动消失？成功/失败不同颜色（绿/红）？
-- [ ] 触发范围：仅手动切换弹，还是自动加载 default 也弹？（自动加载每次新会话都弹可能烦）
-
-### 相关文件
-- `src/core/client.js` — ProfileSelect 切换逻辑（onChange / 自动加载）
-- `README.md` §二-4 — 当前 title 提示设计说明
+> 本文件记录 DSH **运行时、部署与环境**相关的已确认事实、已知特性（非 bug）与故障排查记录
+> （上游版本回归、profile 同步、bundle 加载、升级核查等），按主题追加，不按版本号。
+>
+> 相关文档分工：
+> - **部署步骤**（动态 define/run、静态 add/重启 web）：`README.md` §八
+> - **核心机制与设计坑**（改代码前必读）：`README.md` §六
+> - **功能版本演进史**（pkg-N）：`README.md` §七
+>
+> 沿革：本文件原为 `todo.md` 的 §2（2026-09-20 拆分并重命名，条目编号由 2.x 重排为 1-10）；
+> 同文件原有的 §1「Toast 反馈效果」（仅讨论、未实现）已按用户要求**废弃删除**（决策记录见下方「附录」）。
 
 ---
 
-## 2. 运维备忘（已知特性，非 bug）
+## 0. 附录：已废弃的待办
 
-### 2.1 动态插件 DSH 重启即丢（实测 2026-08-18 发生两次）
+### Toast 反馈效果（2026-08-18 讨论，2026-09-20 废弃删除）
+- 需求：切换 profile 时弹 Toast。**未实现，已放弃**——现有反馈继续只走 select 悬停 title
+  （`已切换: dev · temp 0.2`），理由是工具行槽位有单行高度预算，行内文字会挤动布局导致下拉框错位
+  （见 `README.md` §二-4 / §六-6）。
+- 若将来重启该需求，当时的调研结论是：DSH 端**无现成 toast 服务**（Client 服务目录只有
+  `layout/locale/sessions/slots/theme/timer/workspaces`），但有现成承载槽位
+  `shell.overlay`（list, scope root），可通过模块级事件总线把切换结果送过去，样式复用 `--dsw-alias-*`。
+
+---
+
+## 1. 动态插件 DSH 重启即丢（实测 2026-08-18 发生两次）
 - 动态插件定义在 DSH 进程内存，`dsh web` 重启 = 整个 DSH 重启 → `dshy-1` 消失。
 - 恢复：`node build.mjs` → 读 `dist/dynamic/{host,client}.js` 全文 → `cordis_define`（new 或 existing 追加）→ `cordis_run`。
 - 详见 README §8.1。
 
-### 2.2 静态模式 file: 依赖是拷贝，不自动刷新
+## 2. 静态模式 file: 依赖是拷贝，不自动刷新
 - `dsh plugin --profile web add file:$(pwd)` 把仓库**拷贝**进 `~/.dsh/profiles/web/node_modules/dsh-profile-selector/`。
 - 改代码/构建后 pnpm 不自动刷新（报 "Already up to date"），需重装或手动 `cp` 同步 lib/ 等。
 - 注意：`/plugins/*/client.js` 是**按需读取**（serveBundle 每次请求读文件），同步后**无需重启 web**，刷新页面即生效（boot rev 会自动更新）。
 - 详见 README §8.2。
 
-### 2.3 静态模式 `/rpc` 是共享通道，只能注册一次
+## 3. 静态模式 `/rpc` 是共享通道，只能注册一次
 - 旧适配器每方法各注册一次导致 `webserver: duplicate prefix route "/rpc"` 挂载回滚；已修复为单次注册 + routes Map 分发。
 - 若再遇 405/404：查 `inject: ['connection']` 是否在 patch 与代码中都声明。详见 README §6-8 / §8.2-4。
 
-### 2.4 静态模式 host bundle 需重启 web 才生效（pkg-19 实测）
+## 4. 静态模式 host bundle 需重启 web 才生效（pkg-19 实测）
 - 静态 host bundle（`lib/index.js`）在 web 启动时加载进进程内存；同步文件后**运行中的进程仍是旧代码**，
-  需重启 `dsh web` 才加载新 host bundle（client bundle 按需读取，刷新页面即生效，见 2.2）。
+  需重启 `dsh web` 才加载新 host bundle（client bundle 按需读取，刷新页面即生效，见 §2）。
 - pkg-19（延迟激活修复）已同步静态 bundle，但运行中的静态插件仍是旧逻辑——重启 web 前，
   静态下拉框对冷会话仍可能报「会话不存在或未激活」；动态插件（dshy-2，已 run）不受影响。
 - 验证基线：重启后对冷会话 activate 应返回 `{ok:true, pending:true}`，首次发消息后档案自动注入。
 
-### 2.5 角色分工：动态仅开发调试，正式使用走静态模式（2026-08-31 确认）
+## 5. 角色分工：动态仅开发调试，正式使用走静态模式（2026-08-31 确认）
 - **动态模式（dshy-*）**：进程内存，重启即丢，只用于开发/调试（README §8.1 恢复流程）。
 - **静态模式（dsh-profile-selector）**：正式使用路径，经 `dsh plugin --profile web add file:$(pwd)` 安装。
 
-### 2.6 DSH 0.1.2-alpha.2 升级兼容性核查（2026-08-31，结论：插件零代码改动即兼容）
+## 6. DSH 0.1.2-alpha.2 升级兼容性核查（2026-08-31，结论：插件零代码改动即兼容）
 - 升级路径：`npm install -g @deepseek-ai/dsh` → 0.1.1-rc.2 → **0.1.2-alpha.2**（08-30 发布，大版本内部重构：
   新增 dsh-api-*/dsh-sdk-*/dsh-acp-* 系列，`dsh-client-ui-slots`/`dsh-client-runtime` 包被合并移除）。
 - 逐项核对（对照新版 DSH 源码与运行态）：
@@ -103,7 +77,7 @@ shell.overlay（新注册 toast 组件，常驻，无消息渲染 null）
 - 动态插件在升级重启后必然丢失（进程内存），恢复 = `node build.mjs` → cordis_define → cordis_run
   （README §8.1），本次 2026-08-31 已按此恢复（dshy-1/pkg-1）。
 
-### 2.7 静态 Client 不激活的真正根因：dsh.client.inject 幽灵服务名（pkg-22，2026-08-31）
+## 7. 静态 Client 不激活的真正根因：dsh.client.inject 幽灵服务名（pkg-22，2026-08-31）
 - **现象**：静态下拉框完全不渲染；静态 Host 半区正常（`/rpc` 401 路由存活、档案能注入）。
 - **根因**：0.1.2-alpha.2 里 `package.json` 的 `dsh.client.inject` 被用作 boot 图插件条目的
   **cordis 服务等待列表**（`dsh-client-modules` 浏览器端 `plugins.push({id, inject, ...})`；
@@ -121,7 +95,7 @@ shell.overlay（新注册 toast 组件，常驻，无消息渲染 null）
   （`dsh-client-runtime`/`dsh-client-ui-slots`/`dsh-client-locale`），其 client 半区同样被卡死
   （除非它自己也已适配）；若其功能失效属同一根因。
 
-### 2.8 静态 Client 不激活的真正根因：export default apply 丢 inject（pkg-23，2026-08-31）
+## 8. 静态 Client 不激活的真正根因：export default apply 丢 inject（pkg-23，2026-08-31）
 - **现象**：pkg-22（幽灵 inject 修复）后静态下拉框仍不显示；静态槽位 `conversation.input.right` 无 occupants。
 - **根因**：`cordis-plugin-loader` 的 `unwrapExports`：
   `exports = exports.default ?? exports; if (!exports.__esModule) return exports; return exports.default ?? exports;`
@@ -143,7 +117,7 @@ shell.overlay（新注册 toast 组件，常驻，无消息渲染 null）
   apply`——default 会被解包、丢掉同对象上的 `inject`/`name`。检查所有第三方 client 插件的 bundle
   导出形状（`__export(...)` 里有没有 `default`）。
 
-### 2.9 DSH 0.1.5-alpha.1 回归：connection.rpc.handle 失效（pkg-24，2026-09-09）
+## 9. DSH 0.1.5-alpha.1 回归：connection.rpc.handle 失效（pkg-24，2026-09-09）
 - **现象**：`dsh plugin --profile web add file:/mnt/f/git/node/dsh-scene` → loader 报
   `dsh: plugin tree failed to load: failed to apply loader entry dsh-profile-selector (dsh-profile-selector): cannot get property "webServer" without inject`
   （`dsh-client-connection/lib/index.js:618`），条目回滚；profile package.json 不留依赖，但 `node_modules/.pnpm` 残留旧副本。
@@ -157,3 +131,36 @@ shell.overlay（新注册 toast 组件，常驻，无消息渲染 null）
 - **备选（DSH 侧）**：`~/.dsh/profiles/web/cordis.patch.yml` 加 `- id: connection` + `inject: [webRuntime, webServer]` 可恢复 rpc.handle；
   若上游修复（connection 重新自注入 webServer），本插件两种写法都可用。
 - **升级备忘**：新版 profile 启动时重新同步（`node_modules`/`package.json`/`cordis.yml`）；安装失败会回滚 package.json，重装前无需清理 .pnpm 残留。
+
+## 10. 子代理会话不加载档案 + 未激活会话误报红字（pkg-27，2026-09-20）
+- **现象**：① one-shot 子代理会话既无输入框也无下拉框；② continuable 子代理会话有输入框与下拉框，但显示红字
+  「会话不存在或未激活」，**切回主会话再切回来红字消失**；③ 子代理的 system prompt 里没有 `.deepseek.yaml`
+  档案正文（只有 `global_prompt` 的 `harness:identity` 覆盖）。
+- **根因一（红字 / 延迟激活失效）**：`sessionExists()` 用 `sessionPersistence.list()` 快照的**顶层 `s.id`** 匹配，
+  而快照的会话标识在 **`snapshot.header.id`**（`@deepseek-ai/dsh-session-persistence` 的 `SessionPersistenceSnapshot`）
+  → 恒为 false → `activate` 对任何未激活会话直接返回 `{ok:false, error:'会话不存在或未激活'}`。
+  子代理会话几乎必然命中（结算后不驻留，也不在 `sessions` 内存表）。
+  ⚠️ **「红字消失」是假象**：换会话只是 React 重挂载清掉 error state，而 Client `autoFired` 已记录该 sessionId
+  → 不再重试 → 档案始终没注入。排查此类「刷新后报错消失」的问题时要先确认**修复动作是否真的发生过**。
+- **根因二（子代理没有注入入口）**：档案只在客户端 `.activate` 时注册；one-shot 子代理会话被 DSH `ui-subagent`
+  的只读 composer 接管整个 `conversation.composer` 链（`conversation.input.left/right` 槽不渲染）→ 无下拉框、
+  也无 activate；continuable 子代理则撞上根因一。**结论：档案注入不能只依赖 UI。**
+- **根因三（不继承父 agent 作用域）**：DSH scope 链不继承父 agent 的层——`applyChildComposition()` →
+  `agentPresets.composeFrom(childCtx, parent.ctx)` 内部是 `bindScopeParent(agentKey, standing.key)`，
+  把子代理 scope 挂到 **preset standing mount**、而不是父 agent scope（`packages/preset/agent-presets/src/index.ts:484`），
+  因此父会话已选档案不会自动落到子代理。实测印证：子代理**有** `global_prompt` 覆盖（走 `agent/created` 自动路径）、
+  **没有**档案正文（只由客户端驱动）。
+- **修复**：① `sessionExists()` 改用 `snapshot.header.id`（兼容旧形态）并**降级为日志判据**；
+  ② `activate` 在 agent 缺失时**一律** `pending` 排队（不再返回 error，只在查无记录时 warn）；
+  ③ 新增 `persistedCwd()`/`resolveCwd()`，`.profiles` 在内存路径全失败后用持久化 header 兜底解析 cwd；
+  ④ `agent/created` 对 `header.origin === 'subagent'` 的会话**继承父会话当前档案**（父无选择回退 `default`），
+  显式排队优先，注册只作用于该子代理作用域；⑤ Client 修「`.profiles` 成功却不清 `fatal`」的首帧竞态 +
+  子代理会话跳过自动加载 default + title 标注档案来源。
+- **验证**：`node scripts/verify-offline.mjs` → **66/66**（E 组 14 项：继承/回退/不注入/优先级/`header.id` 匹配/
+  cwd 兜底/不报 error/与开场白共存）；反向对照（把匹配改回顶层 `s.id`）精确复现 E9/E10 失败，恢复后 66/66；
+  GUI 实测（2026-09-20，用户确认）：子代理会话红字消失、下拉框显示 `profile-开发者模式`，
+  子代理自述 system prompt 含档案声明段且与父会话一致。根因/边界/验证全文见 README §六-11。
+- **边界（非 bug）**：one-shot 子代理会话没有输入区（DSH 设计，插件绕不过；要显示只能改挂槽位，如
+  `conversation.session.header.leading`）；**历史**子代理会话提示词已定型、无法回溯注入，且其下拉框会回退显示
+  `profile-<default>` 而实际未注入（2026-09-20 决定**不处理**该显示不一致）；Host 内存 `active` 随 DSH 重启清空，
+  父会话重新打开时自动重载 default，之后的子代理继承那个选择。

@@ -1,11 +1,16 @@
 /**
  * dsh-profile-selector — 离线验证脚本（无需 DSH 运行时）
  *
- * 覆盖四块：
- *   A. 迷你 YAML 解析器：标量列表（block sequence）与既有 map/标量行为
+ * 覆盖五块：
+ *   A. 真实 .deepseek.yaml 结构守护（不写死档案名/文件名）+ 迷你 YAML 解析器（block sequence 与既有 map/标量行为）
  *   B. 档案 file 支持 string | string[]：按声明顺序合并、任一文件缺失即整体失败
  *   C. workspace.global_prompt：未配置 / 文件不存在 / 文件为空 → 不覆盖并清理残留
  *   D. 既有行为回归：单文件档案、temperature 注入、幂等、pending 延迟激活
+ *   E. 子代理会话档案继承（继承父会话档案 / 回退 default / 不注入普通会话 / 显式优先）+ 未激活会话排队语义
+ *      （sessionPersistence 快照按 header.id 匹配、cwd 兜底、不报红字）——见 README §六-11
+ *
+ * 维护须知：对**工作区真实配置**的断言只做结构守护（用户可随时增删档案、改 file 写法）；真实读盘路径
+ * 由 A4-A6 用 realFs 端到端覆盖。历史教训：旧 A1-A3 写死了档案名与文件名，2026-09-15 配置改写后即整体失效。
  *
  * 用法：node scripts/verify-offline.mjs   （全部通过则退出码 0）
  */
@@ -41,6 +46,11 @@ function makeEnv(opts) {
   const files = Object.assign({}, o.files)
   const cwd = o.cwd || '/ws'
   const brokenDisposer = !!o.brokenDisposer
+  // realFs=true：mock fs 未命中内存 files 时回退真实磁盘（用于「真实 .deepseek.yaml + 真实档案文件」守护）
+  const realFs = !!o.realFs
+  // sessions 内存表只认登记过的会话 id；persistence 模拟 sessionPersistence.list() 的快照数组
+  const memSessions = new Set(o.memSessions || [])
+  const persistence = o.persistence
   const logs = []
   const rpcHandlers = new Map()
   const listeners = new Map()
@@ -52,8 +62,11 @@ function makeEnv(opts) {
       return rel.startsWith('/') ? rel : base.replace(/\/+$/, '') + '/' + rel
     },
     async readText(target) {
-      if (!Object.prototype.hasOwnProperty.call(files, target)) throw new Error('ENOENT: ' + target)
-      return files[target]
+      if (Object.prototype.hasOwnProperty.call(files, target)) return files[target]
+      if (realFs) {
+        try { return readFileSync(target, 'utf8') } catch (e) { throw new Error('ENOENT: ' + target) }
+      }
+      throw new Error('ENOENT: ' + target)
     },
   }
   const ctx = {
@@ -61,7 +74,10 @@ function makeEnv(opts) {
       if (name === 'fs') return fs
       if (name === 'sandboxPolicy') return { workspaceRoot: '/deploy-root' }
       if (name === 'agents') return { get: (id) => agents.get(id) }
-      if (name === 'sessions') return { get: (id) => (id ? { id } : undefined) }
+      if (name === 'sessions') return { get: (id) => (memSessions.has(id) ? { id } : undefined) }
+      if (name === 'sessionPersistence') {
+        return persistence === undefined ? undefined : { list: async () => persistence }
+      }
       return undefined
     },
     logger: { warn: (m) => logs.push(String(m)) },
@@ -78,7 +94,8 @@ function makeEnv(opts) {
     },
   })
 
-  function makeAgent(sessionId) {
+  /** 登记一个已激活 agent；headerExtra 可带 origin/parentSession（子代理会话血缘）。 */
+  function makeAgent(sessionId, headerExtra) {
     const scoped = new Map()
     const global = new Map()
     global.set(IDENTITY, { name: IDENTITY, order: -1000, text: 'You are an AI agent powered by DeepSeek Harness.' })
@@ -97,7 +114,7 @@ function makeEnv(opts) {
     }
     const agent = {
       id: sessionId,
-      session: { header: { cwd } },
+      session: { header: Object.assign({ cwd }, headerExtra || {}) },
       ctx: {
         systemPrompt: sp,
         on(event, fn) { if (event === 'agent/request') requestHandlers.push(fn); return () => {} },
@@ -119,19 +136,48 @@ function makeEnv(opts) {
   return { files, cwd, logs, makeAgent, created, rpc }
 }
 
-/* ---------------- A. YAML 解析 ---------------- */
+/* ---------------- A. YAML 解析 + 真实 .deepseek.yaml 守护 ---------------- */
 {
-  const real = parseYaml(readFileSync(join(ROOT, '.deepseek.yaml'), 'utf8'))
-  const aiFile = real.workspace.system_prompts.ai.file
-  ok('A1 真实 .deepseek.yaml：数组 file 解析为数组', Array.isArray(aiFile) && aiFile.length === 2, JSON.stringify(aiFile))
-  ok('A2 真实 .deepseek.yaml：数组顺序保留', Array.isArray(aiFile) && aiFile[0] === 'doc/prompts/global.md', JSON.stringify(aiFile))
-  eq('A3 单文件仍是字符串', real.workspace.system_prompts.default.file, 'doc/prompts/dev.md')
-  eq('A4 标量类型（数字/引号/布尔/null）', parseYaml('a: 1\nb: "q"\nc: true\nd: null\n'), { a: 1, b: 'q', c: true, d: null })
-  eq('A5 缩进列表', parseYaml('a:\n  b:\n    - x\n    - y\n  c: 1\n'), { a: { b: ['x', 'y'], c: 1 } })
-  eq('A6 零缩进列表（- 与 key 同缩进）', parseYaml('file:\n- a\n- b\nname: n\n'), { file: ['a', 'b'], name: 'n' })
-  eq('A7 列表之后接同级 map 键', parseYaml('p:\n  file:\n    - f1\n    - f2\n  name: "t"\n'), { p: { file: ['f1', 'f2'], name: 't' } })
-  eq('A8 空值键无子项仍为对象', parseYaml('a:\nb: 1\n'), { a: {}, b: 1 })
-  eq('A9 注释与空行忽略', parseYaml('# c\n\na: 1\n\n'), { a: 1 })
+  // ⚠️ 对真实配置只做**结构守护**，不写死档案名/文件名：工作区配置由用户随时增删档案、
+  // 改 file 写法（2026-09-15 把 file 改成数组时，写死具体值的旧 A1-A3 就整体失效了——
+  // 这正是本次修正的来源）。真实配置 + 真实档案文件的端到端解析由 A4-A6 覆盖。
+  const raw = readFileSync(join(ROOT, '.deepseek.yaml'), 'utf8')
+  const real = parseYaml(raw)
+  const prompts = real.workspace && real.workspace.system_prompts
+  ok('A1 真实 .deepseek.yaml：system_prompts 为非空对象',
+    !!prompts && typeof prompts === 'object' && Object.keys(prompts).length > 0, JSON.stringify(prompts))
+  ok('A2 真实 .deepseek.yaml：每个档案的 file 是 string | 非空 string[]',
+    Object.values(prompts || {}).every((p) => (typeof p.file === 'string' && p.file.length > 0)
+      || (Array.isArray(p.file) && p.file.length > 0 && p.file.every((f) => typeof f === 'string' && f.length > 0))),
+    JSON.stringify(Object.values(prompts || {}).map((p) => p.file)))
+  ok('A3 真实 .deepseek.yaml：global_prompt 若存在必为字符串',
+    real.workspace.global_prompt === undefined || typeof real.workspace.global_prompt === 'string',
+    JSON.stringify(real.workspace.global_prompt))
+
+  const realEnv = makeEnv({
+    cwd: ROOT,
+    realFs: true,
+    files: { [join(ROOT, '.deepseek.yaml')]: raw },
+  })
+  const realAgent = realEnv.makeAgent('real-1')
+  const rp = await realEnv.rpc('profiles', { sessionId: 'real-1', cwd: ROOT })
+  ok('A4 真实配置可解析出档案', !!rp && rp.profiles.length > 0 && !rp.error,
+    JSON.stringify({ n: rp && rp.profiles.length, error: rp && rp.error }))
+  ok('A5 每个档案的 files 与 file 形状一致（单文件=字符串 / 多文件=数组）',
+    rp.profiles.every((p) => Array.isArray(p.files) && p.files.length > 0
+      && (p.files.length === 1 ? p.file === p.files[0] : Array.isArray(p.file))),
+    JSON.stringify(rp.profiles.map((p) => ({ file: p.file, files: p.files }))))
+  const ra = await realEnv.rpc('activate', { sessionId: 'real-1', profile: rp.profiles[0].name, cwd: ROOT })
+  ok('A6 真实档案正文读盘并注册 section',
+    ra.ok === true && ((((realAgent.scoped.get(SECTION) || {}).text) || '').length > 0), JSON.stringify(ra))
+
+  eq('A7 标量类型（数字/引号/布尔/null）', parseYaml('a: 1\nb: "q"\nc: true\nd: null\n'), { a: 1, b: 'q', c: true, d: null })
+  eq('A8 缩进列表', parseYaml('a:\n  b:\n    - x\n    - y\n  c: 1\n'), { a: { b: ['x', 'y'], c: 1 } })
+  eq('A9 零缩进列表（- 与 key 同缩进）', parseYaml('file:\n- a\n- b\nname: n\n'), { file: ['a', 'b'], name: 'n' })
+  eq('A10 列表之后接同级 map 键', parseYaml('p:\n  file:\n    - f1\n    - f2\n  name: "t"\n'), { p: { file: ['f1', 'f2'], name: 't' } })
+  eq('A11 空值键无子项仍为对象', parseYaml('a:\nb: 1\n'), { a: {}, b: 1 })
+  eq('A12 注释与空行忽略', parseYaml('# c\n\na: 1\n\n'), { a: 1 })
+  eq('A13 单文件（标量）仍是字符串', parseYaml('file: doc/prompts/dev.md\n'), { file: 'doc/prompts/dev.md' })
 }
 
 /* ---------------- B. 档案 file 多文件合并 ---------------- */
@@ -266,6 +312,101 @@ function makeEnv(opts) {
   await env.created(made.agent)
   ok('D9 agent/created 后自动应用档案', ((made.scoped.get(SECTION) || {}).text || '').indexOf('SOLO') !== -1)
   eq('D10 state.active 反映已应用档案', (await env.rpc('state', { sessionId: 's-new' })).active, 'solo')
+}
+
+/* ---------------- E. 子代理会话档案继承 + 未激活会话不报红字（2026-09-20 修复） ----------------
+ * E1-E6：子代理会话（header.origin='subagent' + header.parentSession）在 agent/created 时
+ *         自动继承父会话当前档案，父无选择回退 default；普通会话不自动注入；显式选择优先。
+ * E7-E11：未激活会话一律 pending 排队（不报红字）；sessionPersistence 快照按 header.id 匹配；
+ *         RPC 用持久化 header 兜底解析 cwd。反向对照：把 sessionExists 的匹配改回顶层
+ *         `s.id`，E7/E9 立即失败（这正是本次修复的回归点，见 README §六-11）。
+ */
+{
+  const YAML = 'workspace:\n  system_prompts:\n'
+    + '    ai:\n      file: p/ai.md\n'
+    + '    default:\n      file: p/dev.md\n'
+  const files = {
+    '/ws/.deepseek.yaml': YAML,
+    '/ws/p/ai.md': 'AI_BODY',
+    '/ws/p/dev.md': 'DEV_BODY',
+  }
+
+  // E1-E3：父会话选 ai → 子代理继承 ai
+  const env = makeEnv({ files })
+  env.makeAgent('p1')
+  const pa = await env.rpc('activate', { sessionId: 'p1', profile: 'ai', cwd: '/ws' })
+  ok('E1 父会话先激活 ai', pa.ok === true && pa.profile === 'ai', JSON.stringify(pa))
+  const c1 = env.makeAgent('c1', { origin: 'subagent', parentSession: 'p1' })
+  await env.created(c1.agent)
+  ok('E2 子代理注入了档案 section', c1.scoped.has(SECTION), JSON.stringify([...c1.scoped.keys()]))
+  ok('E3 子代理继承父会话当前档案', ((((c1.scoped.get(SECTION) || {}).text) || '').indexOf('AI_BODY') !== -1),
+    ((c1.scoped.get(SECTION) || {}).text || '').slice(0, 60))
+  eq('E4 state.active 反映继承的档案', (await env.rpc('state', { sessionId: 'c1' })).active, 'ai')
+
+  // E5：父会话没有档案选择 → 子代理回退 default
+  const env2 = makeEnv({ files })
+  env2.makeAgent('p2')
+  const c2 = env2.makeAgent('c2', { origin: 'subagent', parentSession: 'p2' })
+  await env2.created(c2.agent)
+  ok('E5 父无选择时子代理回退 default', ((((c2.scoped.get(SECTION) || {}).text) || '').indexOf('DEV_BODY') !== -1),
+    ((c2.scoped.get(SECTION) || {}).text || '').slice(0, 60))
+
+  // E6：普通（非子代理）会话不自动注入档案
+  const env3 = makeEnv({ files })
+  const plain = env3.makeAgent('n1')
+  await env3.created(plain.agent)
+  ok('E6 普通会话不自动注入档案', !plain.scoped.has(SECTION), JSON.stringify([...plain.scoped.keys()]))
+
+  // E7：显式排队（客户端已选择）优先于父会话继承
+  const env4 = makeEnv({ files })
+  env4.makeAgent('p4')
+  await env4.rpc('activate', { sessionId: 'p4', profile: 'ai', cwd: '/ws' })
+  const rq = await env4.rpc('activate', { sessionId: 'c4', profile: 'default', cwd: '/ws' })
+  const c4 = env4.makeAgent('c4', { origin: 'subagent', parentSession: 'p4' })
+  await env4.created(c4.agent)
+  ok('E7 显式选择优先于父继承',
+    rq.pending === true && ((((c4.scoped.get(SECTION) || {}).text) || '').indexOf('DEV_BODY') !== -1),
+    JSON.stringify(rq))
+
+  // E8-E10：未激活会话 + 持久化快照（header.id 匹配）
+  const coldSnapshots = [{ header: { id: 'cold-1', cwd: '/ws' }, revision: 'r1' }]
+  const env5 = makeEnv({ files, persistence: coldSnapshots })
+  const rc = await env5.rpc('activate', { sessionId: 'cold-1', profile: 'ai' })
+  ok('E8 未激活会话返回 pending 而非 error',
+    rc.ok === true && rc.pending === true && !rc.error, JSON.stringify(rc))
+  ok('E9 命中持久化记录时不误报「会话不存在」（无 warn）',
+    !env5.logs.some((m) => m.indexOf('cold-1') !== -1), JSON.stringify(env5.logs))
+  const rp5 = await env5.rpc('profiles', { sessionId: 'cold-1' })
+  ok('E10 RPC 用持久化 header 兜底解析 cwd',
+    rp5.cwd === '/ws' && rp5.profiles.length === 2 && !rp5.error,
+    JSON.stringify({ cwd: rp5.cwd, n: rp5.profiles.length, error: rp5.error }))
+  const c5 = env5.makeAgent('cold-1', { origin: 'subagent', parentSession: 'p1' })
+  await env5.created(c5.agent)
+  ok('E11 pending 的档案在 agent 创建后自动应用',
+    ((((c5.scoped.get(SECTION) || {}).text) || '').indexOf('AI_BODY') !== -1),
+    ((c5.scoped.get(SECTION) || {}).text || '').slice(0, 60))
+
+  // E12：完全不存在的会话：仅排队 + warn，不报 error
+  const env6 = makeEnv({ files })
+  const rg = await env6.rpc('activate', { sessionId: 'ghost-1', profile: 'ai' })
+  ok('E12 不存在的会话不报 error（仅排队 + warn）',
+    rg.ok === true && rg.pending === true && !rg.error && env6.logs.some((m) => m.indexOf('ghost-1') !== -1),
+    JSON.stringify(rg))
+
+  // E13：子代理会话同时获得工作区开场白覆盖（与档案解耦，两条路径互不影响）
+  const env7 = makeEnv({
+    files: {
+      '/ws/.deepseek.yaml': 'workspace:\n  global_prompt: p/g.md\n  system_prompts:\n    ai:\n      file: p/ai.md\n',
+      '/ws/p/g.md': 'GLOBAL_BODY',
+      '/ws/p/ai.md': 'AI_BODY',
+    },
+  })
+  const c7 = env7.makeAgent('c7', { origin: 'subagent', parentSession: 'p7' })
+  await env7.created(c7.agent)
+  ok('E13 子代理同时获得开场白覆盖（替换 harness:identity）',
+    ((((c7.scoped.get(IDENTITY) || {}).text) || '').indexOf('GLOBAL_BODY') !== -1), JSON.stringify([...c7.scoped.keys()]))
+  ok('E14 开场白覆盖与档案继承互不影响（两者同时注册）',
+    c7.scoped.has(IDENTITY) && c7.scoped.has(SECTION), JSON.stringify([...c7.scoped.keys()]))
 }
 
 /* ---------------- 汇总 ---------------- */

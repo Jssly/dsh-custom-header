@@ -31,7 +31,7 @@
 | `src/static/host.js` | 静态模式 Host 壳（ESM import 核心；`connection.rpc.handle` 适配） |
 | `src/static/client.js` | 静态模式 Client 壳（ESM import 核心；`connection.rpc.call` 适配） |
 | `build.mjs` | 双模式构建脚本（动态内联 → `dist/dynamic/`；静态 esbuild → `lib/`） |
-| `scripts/verify-offline.mjs` | **离线验证脚本**（零依赖，48 项：YAML 解析 / 多文件合并 / 开场白覆盖语义 / 回归；`node scripts/verify-offline.mjs`） |
+| `scripts/verify-offline.mjs` | **离线验证脚本**（零依赖，66 项：真实 `.deepseek.yaml` 结构守护 + YAML 解析 / 多文件合并 / 开场白覆盖语义 / 子代理档案继承 / 回归；`node scripts/verify-offline.mjs`） |
 | `cordis.patch.yml` | 静态模式挂载层（`dsh plugin` 安装时插入 loader） |
 | `package.json` | 项目元信息（`dsh.bundle.patch` / `dsh.client` / `exports` / `build` 脚本） |
 | `dist/dynamic/{host,client}.js` | **构建产物**：动态函数体（cordis_define 用；勿手改） |
@@ -41,6 +41,7 @@
 | `doc/prompts/global.md` | **工作区级开场白覆盖正文**（由 `.deepseek.yaml` → `workspace.global_prompt` 指向；用于**替换** DSH 默认开场白 `You are an AI agent powered by DeepSeek Harness.`，见 §六-10） |
 | `.deepseek.yaml` | 工作区配置（`system_prompts` 档案源 + `global_prompt` 开场白覆盖；被插件解析，含 `parameters.temperature`）。档案 `file` 可为**字符串或字符串数组**（数组=按序合并多个提示词文件）；`global_prompt` **缺失/文件不存在时不会被覆盖**（见 §六-10） |
 | `README.md` | 本文档（功能 + 开发说明 + 版本史 + 已知坑） |
+| `ops-notes.md` | **运维备忘 / 已知特性与排查记录**（部署环境、profile/bundle 同步、上游版本回归、升级核查；原 `todo.md` §2，2026-09-20 拆分重命名，条目编号 1-10，见其文件头） |
 | `pnpm-workspace.yaml` | pnpm 构建策略（`allowBuilds: esbuild: true`，允许 esbuild 跑安装脚本） |
 | `.gitignore` | 忽略 `node_modules/`、`.pnpm-store/`、`.idea/` 等 |
 
@@ -78,6 +79,13 @@
    - **未配置（键缺失 / 值非字符串 / 空值）/ 文件不存在 / 文件为空 → 一律「不覆盖」**：先卸载已有覆盖
      （`disposer` + `forceCleanSection` 兜底，见 §六-10），再保留 DSH 默认开场白（只记 warn，不阻断会话创建）；
    - 生效确认：下拉框悬停 title 追加 `· 开场白覆盖: <file>`；`.state` RPC 返回 `globalPrompt` 字段。
+8. **子代理会话（2026-09-20 新增）**：DSH 委派出的子代理会话（session header `origin: 'subagent'`）由 **Host 侧自动继承
+   父会话当前档案**（父无选择则回退 `default`），无需界面操作；Client 对子代理会话**不再自动加载档案**
+   （避免与 Host 继承重复、并绕开「未激活」竞态），悬停 title 追加 `· 子代理会话(继承父会话档案)`。
+   - **不再出现红字**：未激活的会话（含子代理、冷会话）一律走排队（`pending`），不再回 `会话不存在或未激活`（§六-11）。
+   - ⚠️ **one-shot 子代理会话没有输入区**：DSH `ui-subagent` 会用只读 composer 接管 `conversation.composer` 链，
+     `conversation.input.left/right` 槽整体不渲染——这是 DSH 的既有设计，插件无法在该会话显示下拉框
+     （continuable 子代理会话在有输入区时正常显示）。详见 §六-11。
 
 ---
 
@@ -278,6 +286,11 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 - 配套：`.state` 把 pending 档案也算当前选中（下拉框不跳回默认）；Client 对 `pending:true` 显示
   「已排队(会话激活后生效)」提示而非红字；`dispose` 时清空 pending。
 - 注意：`agent/created` 是 scoped emit（`this: Scoped<Agent>`），监听器必须用 `agent.id`（=== session.id）查 pending。
+- ⚠️ **pkg-27 修正（2026-09-20）**：本节第 3 条的「会话确实不存在 → 才返回 `{ok:false, error:'会话不存在或未激活'}`」已**取消**。
+  该判据依赖 `sessionExists()`，而它当时用 `sessionPersistence.list()` 快照的**顶层 `s.id`** 匹配，实际上
+  快照的 id 在 `snapshot.header.id` 上 → 恒为 false → 子代理会话 / 冷会话被误判成「不存在」并报红字，
+  延迟激活随之失效（客户端 `autoFired` 只自动加载一次，被这次误报吞掉）。现在**一律** `pending` 排队，
+  `sessionExists()` 只用于决定是否写一条 warn 日志。语义、根因与验证见 §六-11。
 
 ### 8. ⚠️ 静态 RPC 通道 /rpc 是共享通道，只能注册一次（2026-08-18 修复）
 - 症状：web 重启后 loader entry 应用失败：`webserver: duplicate prefix route "/rpc"`，插件被回滚（boot 图无该插件）。
@@ -353,17 +366,94 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 - **验证手段**：
   - 下拉框悬停 title 尾部 `· 开场白覆盖: doc/prompts/global.md`；`.state` RPC 的 `globalPrompt` 字段；
   - 观察会话 system prompt：首段应为 `doc/prompts/global.md` 正文，且不再出现 `You are an AI agent powered by DeepSeek Harness.`；
-  - 离线验证脚本 `scripts/verify-offline.mjs`（**48 项**，无需 DSH 运行时）：mock `ctx.get('fs'|'agents')` +
+  - 离线验证脚本 `scripts/verify-offline.mjs`（**66 项**，无需 DSH 运行时）：mock `ctx.get('fs'|'agents')` +
     捕获 `agent/created` 监听器，断言注册的 section 名/order/文本、多文件合并顺序、失败分支不抛异常、
     compact 重注册不撞名、global 层未被破坏，以及**「未配置 / 文件被删 / 文件被清空 → scoped 层无残留」**
     （用 `brokenDisposer` 复现 disposer 失效；反向对照：去掉 `forceCleanSection` 兜底则该 4 项失败）。
+  - pkg-27 起该脚本为 **66 项**：A 组改为「真实 `.deepseek.yaml` 结构守护 + 真实档案文件端到端解析」，
+    新增 E 组子代理继承与排队语义（见 §六-11）。
+
+### 11. 子代理会话的档案继承 + 未激活会话的排队语义（2026-09-20，pkg-27 修复）
+
+**症状**（用户报告）：由主代理委派出的子代理会话里，① one-shot 子代理会话没有下拉框（也没有输入区）；
+② continuable 子代理会话有输入框和下拉框，但显示红字（疑似「会话不存在或未激活」），切回主会话再切回来红字消失；
+③ 子代理的 system prompt 里**没有** `.deepseek.yaml` 档案正文。
+
+**根因 1：`sessionExists()` 读错字段 → 未激活会话被误判为「不存在」并报红字**
+
+- DSH `sessionPersistence.list()` 返回 `SessionPersistenceSnapshot[]`，会话标识在 **`snapshot.header.id`**，
+  顶层**没有** `id`（`packages/session/session-persistence/src/index.ts:50`）。
+- 旧代码 `list.some((h) => h.id === sessionId)` **恒为 false** → §六-8 的延迟激活判据永远判「会话不存在」，
+  `activate` 直接返回 `{ok:false, error:'会话不存在或未激活'}` → Client 渲染红字。
+- 触发面：任何 `agents.get(sessionId)` 取不到 agent 的会话。子代理会话几乎必然命中
+  （子代理结算后不驻留；子代理会话也一般不在 `sessions` 内存表）。
+- ⚠️ 切换会话后「红字消失」是**假象**：React 重新挂载把 error state 清掉了，而 Client `autoFired`
+  已记录该 sessionId → 不再重试 → 档案**始终没注入**。这正是「红字消失后子代理仍然没有档案」的原因。
+
+**根因 2：档案注入是「客户端 RPC 驱动」的，而子代理会话没有 UI 入口**
+
+- `system_prompts` 档案只在 `.activate`（下拉框自动加载 default / 手动切换）时注册；one-shot 子代理会话
+  被 DSH `ui-subagent` 用**只读 composer** 接管整个 `conversation.composer` 链
+  （`packages/client/ui-subagent/src/client/index.ts` 的 `selectReadOnlySubagent` → `SubagentReadOnlyComposer`），
+  `conversation.input.left/right` 槽**根本不渲染** → 既没有下拉框，也没有 `activate` 调用；
+- continuable 子代理会话则撞上根因 1（红字）。
+
+**根因 3：DSH 的 scope 链不继承父 agent 的层，父会话已选档案不会自动落到子代理身上**
+
+- 子代理创建时 `applyChildComposition()` 调 `agentPresets.composeFrom(childCtx, parent.ctx)`
+  （`packages/subagent/subagent/src/child-agent.ts:205`），其实现是
+  `bindScopeParent(agentKey, standing.key)`——把子代理 scope 的父级绑到 **preset 的 standing mount**，
+  **不是父 agent 的 scope key**（`packages/preset/agent-presets/src/index.ts:484`）。
+- `dsh-scope` 的注册视图只沿这条链向下继承（`packages/core/scope/src/index.ts` 的 `scopeChainOf`），
+  因此**父 agent 作用域里注册的档案 section 对子代理不可见**。
+- 实测印证：子代理的 system prompt 里**有** `workspace.global_prompt` 的 `harness:identity` 覆盖
+  （因为它走 `agent/created` 自动路径，与作用域继承无关），**没有**档案正文。
+
+**修复（Host，`src/core/host.js`）**
+
+1. `sessionExists()` 改用 `snapshot.header.id`（兼容旧形态的顶层 `id`），且**降级为日志判据**；
+2. `activate` 在 agent 缺失时**一律** `pending` 排队（`{ok:true, pending:true}`），只在查不到任何记录时写一条 warn
+   ——不再报红字；这样 continuable 子代理 / 冷会话在被创建或冷恢复（`agent/created`）时都能拿到档案；
+3. 新增 `persistedCwd()` + `resolveCwd()`：`.profiles` RPC 在「显式 cwd → 缓存 → agent header」都失败后，
+   从持久化 header 兜底解析 cwd（子代理未驻留时唯一可用的路径，见 §六-7 的 cwd 解析顺序）；
+4. `agent/created` 新增**子代理档案继承**：`header.origin === 'subagent'` 时，
+   取父会话（`header.parentSession`）`active`/`pending` 中的档案 → 无则 `default` → 再否则首个可用档案，
+   经 `enqueue` 串行 `applyActivation()` 注册；注册只作用于**该子代理自己的 agent 作用域**（不影响父/兄弟）。
+   与排队的关系是「**显式选择优先**」：`pending` 命中时先应用排队档案，不再走继承；
+5. 子代理会话的 cwd 在 `agent/created` 时写入 `cwdCache`，供其之后的 RPC（未驻留期间）使用。
+
+**修复（Client，`src/core/client.js`）**
+
+1. `.profiles` 请求**成功即 `setFatal(null)`**：首帧 cwd 尚未就绪时 Host 会返回一次「会话工作区未就绪」，
+   旧实现只 set profiles、从不 clear fatal → 该临时错误把下拉框**永久抑制**（fatal 分支 `return null`，连红字都没有）；
+2. 子代理会话（session summary `origin === 'subagent'`）与会话摘要**尚未就绪**时，**跳过**自动加载 default
+   （档案由 Host 继承，避免重复激活与竞态）；
+3. 下拉框悬停 title 标注 `· 子代理会话(继承父会话档案)`。
+
+**已知边界（不是 bug）**
+
+- **one-shot 子代理会话没有输入区** → 下拉框无处显示（DSH 设计，插件无法绕过；要显示只能改挂槽位，如
+  `conversation.session.header.leading`）；其档案由 Host 继承注入，查看其对话时 system prompt 已是父档案。
+- **历史子代理会话**（本次修复前创建的）提示词已定型，无法回溯注入；只对之后新建的子代理生效。
+- Host 内存 `active` 随 DSH 重启清空：父会话重新打开时会自动重新加载 default，之后的子代理继承那个选择。
+
+**验证**
+
+- `node scripts/verify-offline.mjs` → **66/66**（E 组 14 项覆盖子代理继承 `ai`/`default` 回退、普通会话不注入、
+  显式选择优先、`header.id` 匹配、cwd 兜底、不报 error、开场白与档案共存）；
+- 反向对照：把 `sessionExists()` 的匹配改回顶层 `s.id` → **E9/E10 立即失败**（`cwd=null` + 误报 warn），
+  恢复后 66/66；
+- 运行时实测（2026-09-20）：让子代理转述自身 system prompt，确认修复前「有 `global_prompt` 覆盖、无档案正文」。
+
+**修复后人工验证**：新建一个 continuable 子代理 → 其 system prompt 应含
+「【当前会话已通过界面选择 .deepseek.yaml 提示词档案「<name>」…】」且角色设定与父会话一致；子代理会话不再冒红字。
 
 ---
 
 ## 七、版本历史
 
 > **编号说明**：原插件实例按 Package 编号演进至 pkg-12（run-10）。DSH 进程重启 / 新 AI 会话重新定义后，
-> Package 编号重新从 pkg-1 计数——本仓库「功能版本」沿用原编号（当前功能版本 = pkg-25：工作区开场白覆盖），
+> Package 编号重新从 pkg-1 计数——本仓库「功能版本」沿用原编号（当前功能版本 = pkg-27：子代理档案继承 + 未激活会话排队），
 > 每次会话实际定义的 Package 编号见 `cordis_inspect_self dshy-1`（pluginId 为 Host 分配，不可改）。
 > 例如本会话（2026-08-18 第二次）DSH 重启后动态插件丢失，重新定义为 dshy-1/pkg-1（run-1），
 > profile 文案更新为 dshy-1/pkg-2（run-2），功能等价于本表的 pkg-16。
@@ -387,24 +477,32 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 | pkg-18 | **修复切换对话误读用户目录 `.deepseek.yaml`**：根因 `sessionCwd()` 在 agent 未就绪时回退部署级 `sandboxPolicy.workspaceRoot`（`/home/j/workspace/dsh`）。修复：① Client 从会话 store（`useSessions` → `s.byId[sessionId].cwd`）显式传 `cwd` 给 RPC；② Host `sessionCwd(sessionId, explicitCwd)` 按「显式 cwd → 缓存 → agent header」解析并缓存；③ 解析不到返回 `null` + 明确错误，**不回退部署根** | ✅ 双模式同步生效（2026-08-19，动态 run-1 / 静态需重启 web 加载新 host bundle） |
 | pkg-19 | **修复「新建会话下拉框已加载但 activate 报『会话不存在或未激活』」**：根因 `agents.get(sessionId)` 只返回已激活 agent，会话存在但 agent 未发布（新会话空白期/冷会话/DSH 重启未恢复）被误判为会话不存在。修复：① activate 在 agent 缺失时查会话真实存在性（`sessions` + `sessionPersistence.list()`，查询失败按存在处理），存在则暂存 `pending` Map 并返回 `{ok:true, pending:true}`；② 新增 `ctx.on('agent/created')` 监听，agent 发布后经 `enqueue` 串行调用共享 `applyActivation()` 自动应用；③ `.state` 把 pending 档案算当前选中；④ Client 对 `pending:true` 显示「已排队(会话激活后生效)」而非红字；⑤ `dispose` 清空 pending。详见 §六-8 | ✅ 单测 10 项全过（2026-08-19）；动态 run-1 已生效；静态需重启 web 加载新 host bundle |
 | pkg-20 | **工作区没有 `.deepseek.yaml` 时不显示下拉框**：Client 加载失败（fatal：读文件 ENOENT / cwd 未就绪 / RPC 失败）时不再渲染红色 `.err` 报错文字，改为 `return null` 直接不渲染下拉框；空档案（无 `system_prompts`）同样不渲染。仅切换失败仍渲染红色 `.err` 行内文字 | ✅ 双模式同步生效（2026-08-25，动态 run-1 已生效；静态需同步 bundle 后刷新页面） |
-| pkg-21 | **DSH 0.1.2-alpha.2 升级兼容性核查（无代码改动）**：升级（0.1.1-rc.2 → 0.1.2-alpha.2，08-30 发布）后动态插件随进程重启丢失（进程内存，已知行为，按 §8.1 重新部署即恢复）。逐项核对新版 API 全部兼容：动态内置符号（harness/host.call/styles/React）、槽位注册格式 `{name,id,order,label}` 与 props（useSessions/sessionId）、Host 服务（fs/agents/sessions/sessionPersistence/sandboxPolicy/systemPrompt）、事件（agent/created、agent/request）、`PromptSection {name,order,text}`、静态 `connection`/`/rpc` 通道（新版加浏览器 auth fence，外部 curl 401 属预期）、`__ModuleLoader__` 协议、`forceCleanSection` 安全网（运行时内部结构未变）。**角色分工确认：动态仅开发调试，正式使用走静态模式**。详见 todo.md §2.6 | ✅ 动态重新部署即恢复（2026-08-31，dshy-1/pkg-1）；静态 bundle 与已提交版本逐字节一致，无需重编译，重装仅刷新 profile 副本 |
+| pkg-21 | **DSH 0.1.2-alpha.2 升级兼容性核查（无代码改动）**：升级（0.1.1-rc.2 → 0.1.2-alpha.2，08-30 发布）后动态插件随进程重启丢失（进程内存，已知行为，按 §8.1 重新部署即恢复）。逐项核对新版 API 全部兼容：动态内置符号（harness/host.call/styles/React）、槽位注册格式 `{name,id,order,label}` 与 props（useSessions/sessionId）、Host 服务（fs/agents/sessions/sessionPersistence/sandboxPolicy/systemPrompt）、事件（agent/created、agent/request）、`PromptSection {name,order,text}`、静态 `connection`/`/rpc` 通道（新版加浏览器 auth fence，外部 curl 401 属预期）、`__ModuleLoader__` 协议、`forceCleanSection` 安全网（运行时内部结构未变）。**角色分工确认：动态仅开发调试，正式使用走静态模式**。详见 ops-notes.md §6 | ✅ 动态重新部署即恢复（2026-08-31，dshy-1/pkg-1）；静态 bundle 与已提交版本逐字节一致，无需重编译，重装仅刷新 profile 副本 |
 | pkg-22 | **修复静态 Client 在 DSH 0.1.2-alpha.2 下不激活（下拉框不渲染）**：根因 `package.json` 的 `dsh.client.inject` 在新版被当作 **cordis 服务等待列表**（boot 图插件条目的 inject），而旧值 `["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-slots"]` 指向**已不存在的包**（前者整个被移除；后者只是前端 require seed 模块、非服务）→ 条目永远 waiting → `apply` 永不执行。**修复**：`dsh.client.inject` 改为 `["slots", "connection"]`（与 `src/static/client.js` 的 `export const inject` 一致；`react` 由前端 seed 提供无需声明 external）。静态 Host 半区不受影响（patch 的 `inject: [connection]` 是真实服务，一直正常） | ⚠️ 该修复必要但**不充分**（见 pkg-23） |
 | pkg-23 | **修复静态 Client 不激活的真正根因：`export default apply`**。pkg-22 后下拉框仍不显示，深挖 loader（`cordis-plugin-loader`）`unwrapExports`：`exports = exports.default ?? exports`——bundle 若导出 `default`（= apply 函数），解包后 plugin = **裸函数**，`plugin.inject` 丢失。静态 Host 有 patch YAML 的 `inject: [connection]`（loader 合并条目 options inject）所以正常；静态 **Client** 条目由 kernel 按名字创建（`o.create({name})`，无 options inject），只靠 bundle 导出的 inject 等待 slots/connection——丢失后 apply 立即执行、`ctx.get('connection')` 尚为 undefined → **静默 return → 无下拉框**。参考 `dsh-custom-header` 的 bundle（只导出 `{apply, inject}`，无 default）。**修复**：删除 `src/static/{host,client}.js` 的 `export default apply`，只导出 `{name, inject, apply}` / `{inject, apply}`；已用 `unwrapExports` 逻辑模拟验证新旧形状 | ✅ 2026-08-31 修复；需重装 + 重启 web + 刷新页面生效 |
 | pkg-24 | **修复 DSH 0.1.5-alpha.1 静态挂载失败（`cannot get property "webServer" without inject`）**：根因新版把 connection 插件的 inject 由 `["webServer","credentials"]` 改为 `["credentials"]`（/api 路由改 `ctx.inject(['webServer'], ...)`），而 `connection.rpc.handle` 的 owner 是 cordis 影子 Context（`symbols.shadow` = connection 服务 ctx，解析从 connection fiber 向上），故调用方怎么 inject 都无效；`src/static/host.js` 改用 `connection.register(ctx, '/rpc', handler)` 显式传 owner，壳与 patch 声明 `inject: ['connection','webServer']`。用真实 `HostConnectionService` + cordis 4.0.2 复现验证（新旧两代语义均注册 `prefix:/rpc`） | ✅ 2026-09-09 修复；需重装 `dsh plugin --profile web add file:$(pwd)` + 重启 web |
 | pkg-25 | **工作区级开场白覆盖 `workspace.global_prompt`（2026-09-15 新增）**：以同名 section `harness:identity`（order −1000）注册进 agent 作用域，按名 shadow 掉 DSH 第一方开场白 `You are an AI agent powered by DeepSeek Harness.`（`dsh-scope` 的 `ScopedLayers.merge` 语义），用于消除英文自我介绍导致的中文用户「默认英文思考」。要点：① `loadProfiles()` 重构为 `loadWorkspace()`（档案 + `global_prompt` 一次解析）；② `applyIdentity()` 随 `agent/created` 对每个会话自动执行，与档案选择解耦；③ 切档案时重读（免重启）；④ 失败绝不抛出、空文件视为未配置 → 保留 DSH 默认；⑤ ⚠️ `forceCleanSection` 加 `name` 参数且对 `harness:identity` **禁用 global 层清扫**（否则会波及所有工作区）；⑥ `.profiles`/`.state`/`.activate` 返回 `globalPrompt` 诊断字段；⑦ Client 下拉框 tooltip 追加「开场白覆盖: `<file>`」。详见 §六-10 | ✅ 离线验证 16/16 通过（mock ctx + 捕获 `agent/created`）；已重装 `file:` 副本（md5 与新建构建一致）；**需重启 `dsh web` 生效** |
 | pkg-26 | **档案 `file` 支持数组 + `global_prompt` 未配置/文件缺失时不再覆盖（2026-09-15 新增）**：① 迷你 YAML 解析器补上**标量列表**（block sequence；`key:` 空值占位在首个 `- item` 时就地升级为数组）——此前 `- item` 行被丢弃，`file:` 数组解析成 `{}` → 整个档案被 `typeof file === 'string'` 过滤掉，**数组档案根本不出现在下拉框**；② `loadWorkspace()` 用 `normalizeFiles()` 规范化 `string \| string[]`（顺序保留、空串/非字符串项忽略、无有效文件即剔除档案），档案对象新增 `files`（恒为数组=合并顺序），`file` 保持向后兼容（单文件=字符串 / 多文件=数组）；③ `profileText()` 按 `files` 顺序逐个读盘 + 占位符替换，用**空行**合并为一段正文，任一文件失败**整体失败**（错误带「档案名 + 第 i/n 个 + 文件名」）；④ `applyIdentity()` 重写并抽出 `unapplyIdentity()`（disposer + `forceCleanSection` 兜底），**未配置（键缺失/非字符串/空值）/ 文件不存在 / 文件为空 四条路径一律先卸载旧覆盖再返回 `applied:false`**，修掉「配置已删、覆盖仍在」（disposer 静默失效导致）的状态不一致；⑤ 新增 `scripts/verify-offline.mjs`（48 项断言 + 反向对照）。详见 §二-6/7、§四、§五、§六-10 | ✅ 离线验证 48/48 通过；反向对照（去掉兜底）精确复现 4 项失败（2026-09-15）；需重建 `lib/` + 同步 profile 副本 + 重启 `dsh web` 生效 |
+| pkg-27 | **修复子代理会话不加载档案 + 未激活会话误报红字（2026-09-20）**：**根因一** `sessionExists()` 用 `sessionPersistence.list()` 快照的**顶层 `s.id`** 匹配，而会话标识在 `snapshot.header.id` 上 → 恒为 false → 子代理/冷会话被误判成「会话不存在或未激活」，`activate` 直接报红字、§六-8 的延迟激活随之失效（切换会话「红字消失」只是 React 重挂载清掉 error state，档案始终没注入）；**根因二** 档案注入只由客户端 `.activate` 驱动，而 one-shot 子代理会话被 DSH 只读 composer 接管整个 `conversation.composer` 链（`conversation.input.left/right` 槽不渲染）→ 没有任何自动加载入口；**根因三** DSH scope 链不继承父 agent 的层（`composeFrom` 把子代理 scope 的父级绑到 preset standing mount，不是父 agent scope）→ 父会话已选档案不会落到子代理。**修复**：① `sessionExists()` 改用 `snapshot.header.id`（兼容旧形态）并降级为日志判据；② agent 缺失时**一律** `pending` 排队（不再返回 error，只在查无记录时 warn）；③ 新增 `persistedCwd()`/`resolveCwd()`，`.profiles` 用持久化 header 兜底解析 cwd；④ `agent/created` 对 `header.origin === 'subagent'` 的会话**继承父会话当前档案**（无选择则 `default`，显式排队优先），注册仅作用于该子代理作用域；⑤ Client 修掉「`.profiles` 成功却不清 `fatal`」竞态 + 子代理会话跳过自动加载 default + title 标注档案来源。详见 §六-11 | ✅ 离线验证 **66/66**（E 组 14 项：继承/回退/不注入/优先级/`header.id` 匹配/cwd 兜底/不报 error）；反向对照（匹配改回顶层 `s.id`）精确复现 E9/E10 失败，恢复后 66/66（2026-09-20）；**需重建 + 重载插件（动态 `cordis_run mode:'update'`／静态同步 `lib/` + 重启 web）后新建子代理验证** |
 
 **仓库整理（非插件功能版本，2026-08-18）**：独立为 git 仓库 `dsh-scene`——源码落盘 `src/`、档案并入 `doc/prompts/`、
 `.deepseek.yaml` 与 `package.json` 随仓库管理，README 重构；双模式重构后删除旧的 `src/host.js`/`src/client.js`
 （已被 `src/core/` + 双壳取代），新增 `.gitignore`（忽略 node_modules/.pnpm-store/.idea）与 `pnpm-workspace.yaml`
 （`allowBuilds: esbuild: true`）。初次提交后，后续插件代码变更请在表中追加新的功能版本行。
 
+**文档整理（非插件功能版本，2026-09-20）**：`todo.md` 重命名为 `ops-notes.md`（`git mv`，保留历史）——
+删除原 §1「Toast 反馈效果」（仅讨论、未实现，用户决定废弃，决策留痕见 `ops-notes.md` §0），
+原 §2「运维备忘」十一条目重排为 §1-§10；同步更新引用点：本文件 §一 文件清单、§七 pkg-21 行、
+`cordis.patch.yml`（§九）、`src/static/host.js` 注释（§八）。此后 **待办/需求讨论不再单独建文件**，
+功能想法直接进 §七 或 `ops-notes.md`，运维事实进 `ops-notes.md`。
+
 ---
 
 ## 八、如何部署（下次 AI 会话操作手册）
 
-> **离线自检（无需 DSH 运行时）**：改完 `src/core/` 先跑 `node scripts/verify-offline.mjs`（48 项：YAML 解析 /
-> 多文件档案合并 / 开场白覆盖语义 / 既有行为回归），全过再构建；改解析器或覆盖逻辑时请连同该脚本一起维护。
+> **离线自检（无需 DSH 运行时）**：改完 `src/core/` 先跑 `node scripts/verify-offline.mjs`（66 项：真实
+> `.deepseek.yaml` 结构守护 / YAML 解析 / 多文件档案合并 / 开场白覆盖语义 / 子代理档案继承 / 既有行为回归），
+> 全过再构建；改解析器、覆盖逻辑或会话/子代理语义时请连同该脚本一起维护（项数随用例增删变化，以脚本输出为准）。
 
 ### 8.1 开发模式（动态插件，默认）
 
@@ -427,6 +525,10 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
      且角色设定符合所选档案（default=期权交易员 / dev=开发工程师）。
    - 槽位占用可用 Inspect 确认：`Slots.listSubTree {root:'conversation.input.left'}` →
      occupants 应含 `dyn/dshy-1 → dsh-profile-selector (active)`。
+   - **子代理会话**（pkg-27，§六-11）：在主会话委派一个 continuable 子代理，打开其会话 →
+     ① 不出现红字「会话不存在或未激活」；② 悬停 title 出现 `· 子代理会话(继承父会话档案)`，档案与父会话一致
+     （父选 `ai` 则子代理 `profile-分析师模式`）；③ 让子代理自述 system prompt，应含
+     「当前会话已通过界面选择 .deepseek.yaml 提示词档案」段落。one-shot 子代理会话**没有输入区**属 DSH 设计（预期无下拉框）。
 7. **改动后落盘**：把更新后的核心/壳代码同步写回 `src/`，并在本 README §七 版本历史登记变更。
 
 > ⚠️ **DSH 进程重启会丢动态插件**（实测 2026-08-18 发生两次）：重启 web（`dsh web`）即重启整个 DSH，
@@ -497,6 +599,9 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 - **作用域**：注入只影响发起激活的会话（agent 作用域 section + 该会话 `agent/request` 监听）；
   其他会话不受影响。开场白覆盖同理——`harness:identity` 只在该工作区会话的 agent 作用域内注册，
   **不修改 DSH 全局层**，故其他工作区/其他会话仍用 DSH 默认开场白（见 §六-10）。
+  子代理会话的档案继承同理：注册进**该子代理自己的** agent 作用域（见 §六-11），
+  不影响父会话、父会话的其他子代理，也不需要改动 DSH 源码；子代理的 cwd/血缘
+  （`header.cwd`/`parentSession`/`origin`）均来自 DSH 子会话 header，插件只读不写。
 - **静态模式权限**：`connection.rpc.handle('/rpc', ..., {authority:'loopback'})` 仅接受 loopback 来源
   （`isTrustedApiRequest` 校验，非 loopback 返回 403）；静态 bundle 由 web profile 的 `dsh.client` 声明收录，
   仅服务本机 GUI 页面。

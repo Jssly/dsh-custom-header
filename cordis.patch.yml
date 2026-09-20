@@ -12,7 +12,7 @@
 # 「cannot get property "webServer" without inject」并回滚整个 loader entry。
 # （DSH 0.1.5-alpha.1 起 connection.rpc.handle 已不可用——它的 owner 是服务侧
 # 影子 Context，解析从 connection 插件 fiber 向上，调用方 inject 无效；
-# 详见 README §六-9 / todo.md §2.9。）
+# 详见 README §六-9 / ops-notes.md §9。）
 - insert:
     - id: dsh-profile-selector
       name: dsh-profile-selector

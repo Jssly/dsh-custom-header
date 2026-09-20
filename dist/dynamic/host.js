@@ -119,7 +119,14 @@ function parseYaml(text) {
  *    卸载旧注册（disposer + forceCleanSection 兜底），保留 DSH 默认开场白——绝不「配置没了、
  *    覆盖还在」**；成功路径见 applyIdentity()。
  * 7. 档案 file 支持 string | string[]：数组按声明顺序逐个读盘，用空行合并为一段正文
- *    （见 normalizeFiles / profileText）。
+ *    （见 normalizeFiles / profileText）；
+ * 8. 子代理会话（header.origin === 'subagent'）的档案继承：agent/created 时按父会话
+ *    （header.parentSession）当前档案注入，父无选择回退 default。子代理没有自己的 UI
+ *    入口（one-shot 子代理会话连输入区都不存在），档案只能由 Host 侧注入——DSH 的
+ *    scope 链不继承父 agent 的层，所以父会话已选档案不会自动落到子代理身上（§六-11）；
+ * 9. 未激活会话**一律排队**（pending）而不是报红字：sessionExists() 仅供日志诊断。
+ *    它过去用 snapshot.id 匹配，而 SessionPersistenceSnapshot 的 id 在 header.id 上，
+ *    恒 false → 子代理会话被误判为「不存在」，唯一一次自动加载被吞（§六-11）。
  */
 
 /** Host 半区 apply 函数体：执行全部注册逻辑。 */
@@ -454,12 +461,91 @@ function hostCore(ctx, opts, rpc) {
       const persistence = ctx.get('sessionPersistence')
       if (persistence && typeof persistence.list === 'function') {
         const list = await persistence.list()
-        return Array.isArray(list) && list.some((h) => h && h.id === sessionId)
+        // ⚠️ SessionPersistenceSnapshot 的会话标识在 **snapshot.header.id** 上，顶层没有 id
+        // （见 @deepseek-ai/dsh-session-persistence 的 SessionPersistenceSnapshot）。
+        // 旧写法 list.some((h) => h.id === sessionId) 恒为 false，会把「已存在但未激活」的
+        // 会话（典型是子代理会话）误判成「会话不存在」，直接报红字并让延迟激活失效
+        // ——见 README §六-11。这里同时兼容 header.id 与旧形态的顶层 id。
+        return Array.isArray(list) && list.some((s) => {
+          const id = s && s.header ? s.header.id : (s && s.id)
+          return id === sessionId
+        })
       }
       return false
     } catch (e) {
       return true
     }
+  }
+
+  /** 从持久化记录里读会话 cwd（内存 agent/session 都没有时的最后兜底）。 */
+  async function persistedCwd(sessionId) {
+    try {
+      const persistence = ctx.get('sessionPersistence')
+      if (!persistence || typeof persistence.list !== 'function') return null
+      const list = await persistence.list()
+      if (!Array.isArray(list)) return null
+      const hit = list.find((s) => {
+        const id = s && s.header ? s.header.id : (s && s.id)
+        return id === sessionId
+      })
+      const cwd = hit && hit.header ? hit.header.cwd : null
+      return typeof cwd === 'string' && cwd.length > 0 ? cwd : null
+    } catch (e) {
+      return null
+    }
+  }
+
+  /**
+   * RPC 用 cwd 解析：内存路径（显式传入 / 缓存 / agent header）失败后，
+   * 再查一次持久化记录。子代理会话未驻留（已结束、非 resident）时只有这条路能拿到
+   * cwd——它就是 header 里父会话的 cwd（见 DSH childSessionMeta）。
+   */
+  async function resolveCwd(sessionId, explicitCwd) {
+    const direct = sessionCwd(sessionId, explicitCwd)
+    if (direct) return direct
+    const stored = sessionId ? await persistedCwd(sessionId) : null
+    if (stored) {
+      cwdCache.set(sessionId, stored)
+      return stored
+    }
+    return null
+  }
+
+  /** header.origin === 'subagent' 的会话即子代理会话（DSH childSessionMeta 写入）。 */
+  function isSubagentSession(agent) {
+    try {
+      const header = agent && agent.session && agent.session.header
+      return !!(header && header.origin === 'subagent')
+    } catch (e) {
+      return false
+    }
+  }
+
+  /** 子代理会话的父会话 id（header.parentSession，DSH childSessionMeta 写入）。 */
+  function parentSessionOf(agent) {
+    try {
+      const header = agent && agent.session && agent.session.header
+      const parent = header && header.parentSession
+      return typeof parent === 'string' && parent.length > 0 ? parent : null
+    } catch (e) {
+      return null
+    }
+  }
+
+  /**
+   * 子代理会话应使用的档案：**父会话当前选择优先**，父无选择则回退 default，
+   * 无 default 再用首个可用档案；工作区没有可用档案时返回 name:null（跳过注入）。
+   * @returns { name: string|null, source: 'parent'|'default'|'none' }
+   */
+  async function inheritedProfile(parentSessionId, cwd) {
+    const parentChoice = (parentSessionId ? active.get(parentSessionId) : undefined)
+      || (parentSessionId ? pending.get(parentSessionId) : undefined)
+    const chosen = parentChoice ? (parentChoice.profileName || parentChoice.profile) : null
+    if (chosen) return { name: chosen, source: 'parent' }
+    const profiles = (await loadWorkspace(cwd)).profiles
+    if (profiles.length === 0) return { name: null, source: 'none' }
+    const fallback = profiles.some((p) => p.name === 'default') ? 'default' : profiles[0].name
+    return { name: fallback, source: 'default' }
   }
 
   /**
@@ -514,7 +600,7 @@ function hostCore(ctx, opts, rpc) {
 
   handles.push(rpc.handle(rpcPrefix + '.profiles', async (args) => {
     try {
-      const cwd = sessionCwd(args && args.sessionId, args && args.cwd)
+      const cwd = await resolveCwd(args && args.sessionId, args && args.cwd)
       if (!cwd) return { profiles: [], globalPrompt: null, error: '会话工作区未就绪（无法解析 cwd，sessionId=' + (args && args.sessionId) + '）', cwd: null }
       const ws = await loadWorkspace(cwd)
       return { profiles: ws.profiles, globalPrompt: ws.globalPrompt, cwd }
@@ -550,17 +636,40 @@ function hostCore(ctx, opts, rpc) {
     } catch (err) {
       warn('会话 ' + sessionId + ' 开场白覆盖异常: ' + String((err && err.message) || err))
     }
-    // 2) 延迟激活：应用排队中的档案
+    // 2) 延迟激活：应用排队中的档案（**优先于**下面的子代理继承——那是 UI/调用方的显式选择）
     const req = pending.get(sessionId)
-    if (!req) return
-    pending.delete(sessionId)
-    return enqueue(sessionId, async () => {
-      try {
-        await applyActivation(agent, sessionId, req.profile, req.cwd)
-      } catch (err) {
-        warn('延迟激活失败: ' + String((err && err.message) || err))
-      }
-    })
+    if (req) {
+      pending.delete(sessionId)
+      return enqueue(sessionId, async () => {
+        try {
+          await applyActivation(agent, sessionId, req.profile, req.cwd)
+        } catch (err) {
+          warn('延迟激活失败: ' + String((err && err.message) || err))
+        }
+      })
+    }
+    // 3) 子代理会话的档案继承：子代理没有自己的界面入口（one-shot 子代理会话连输入区都不
+    //    存在，见 README §六-11），档案只能由 Host 侧在 agent/created 时注入。目标档案取
+    //    父会话当前选择，父无选择回退 default。注册只作用于该子代理自己的 agent 作用域
+    //    （DSH 的 scope 链不继承父 agent 的层，因此父会话已选档案不会自动落到子代理身上）。
+    if (!isSubagentSession(agent)) return
+    try {
+      const cwd = agentCwd(agent) || sessionCwd(sessionId)
+      if (!cwd) return
+      cwdCache.set(sessionId, cwd)
+      const pick = await inheritedProfile(parentSessionOf(agent), cwd)
+      if (!pick.name) return
+      await enqueue(sessionId, async () => {
+        try {
+          const applied = await applyActivation(agent, sessionId, pick.name, cwd)
+          if (!applied.ok) warn('子代理会话 ' + sessionId + ' 档案继承失败: ' + applied.error)
+        } catch (err) {
+          warn('子代理会话 ' + sessionId + ' 档案继承异常: ' + String((err && err.message) || err))
+        }
+      })
+    } catch (err) {
+      warn('子代理会话 ' + sessionId + ' 档案继承异常: ' + String((err && err.message) || err))
+    }
   })
   handles.push(stopCreated)
 
@@ -573,12 +682,16 @@ function hostCore(ctx, opts, rpc) {
       try {
         const agent = agents.get(sessionId)
         if (!agent) {
-          // agent 尚未激活（新会话空白期 / 冷会话 / DSH 重启后未恢复）。
-          // 会话真实存在 → 延迟激活：暂存档案，agent/created 后自动应用；
-          // 会话确实不存在 → 才报错。
-          if (!(await sessionExists(sessionId))) return { ok: false, error: '会话不存在或未激活' }
+          // agent 尚未激活：新会话空白期 / 冷会话 / DSH 重启后未恢复 / **子代理会话未驻留**。
+          // 一律走延迟激活：暂存档案，agent/created（或冷恢复续话）后自动应用。
+          // ⚠️ 绝不在这里回「会话不存在或未激活」红字：子代理会话不驻留、且
+          // sessionPersistence 的匹配口径曾经写错（见 sessionExists 注释与 README §六-11），
+          // 误判会把唯一一次自动加载吞掉（客户端 autoFired 只触发一次）。
           if (name) pending.set(sessionId, { profile: name, cwd: explicitCwd })
           else pending.delete(sessionId)
+          if (!(await sessionExists(sessionId))) {
+            warn('会话 ' + sessionId + ' 未激活且查不到持久化记录：档案「' + (name || '空') + '」已排队，待 agent 创建后应用')
+          }
           return { ok: true, profile: name || null, pending: true, temperature: null }
         }
         // 切档案时顺手重读 global_prompt：用户改了 .deepseek.yaml 后无需重启 DSH
