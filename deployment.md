@@ -114,7 +114,7 @@
 - Host 内部事实（供对照）：`sp.layers.scoped`（Map，key=AgentLoop 实例）、`sp.layers.global.sections`（NamedEntries）、
   `layer.sections.data`（普通 Map，可直接 delete）。
 - 静态模式 RPC 失败排查：确认 web profile 的 `connection` 行存在（dsh-web-app patch 自带），
-  `curl -X POST http://127.0.0.1:3080/rpc/dshprofile-static.profiles`（信封见 deployment.md）看响应体（`RpcResult` 形状）。
+  `curl -X POST http://127.0.0.1:3080/rpc/dshprofile-static.profiles`（信封见上文「发布模式」的 curl 示例）看响应体（`RpcResult` 形状）。
 
 ---
 
@@ -149,7 +149,7 @@ lib/  dist/  src/  cordis.patch.yml  package.json  README.md
 CHANGELOG.md  features.md  internals.md  deployment.md
 ```
 
-因此 `ops-notes.md`、`persona-override.md`、`scripts/`、`build.mjs`、`doc/`、`.deepseek.yaml` **不会**进入
+因此 `ops-notes.md`、`scripts/`、`build.mjs`、`doc/`、`.deepseek.yaml` **不会**进入
 profile 拷贝（它们分别在仓库里作为运维记录、设计依据、开发脚本与工作区内容）。
 
 > 调整文档结构时记得同步 `files`：否则 profile 那份 `README.md` 的链接会指向包里不存在的文件。

@@ -473,7 +473,7 @@ function makeEnv(opts) {
 /* ---------------- F. persona 段清空/替换（workspace.persona_prompt / persona_clear，internals.md） ----------------
  * F1-F14：配置求值——清空 / 替换（含占位符）/ 两键缺省完全不改写 / clear 优先 / 空文件 / 读盘失败 /
  *          每次装配重新求值 / 段名落空诊断（一次性 warn）
- * F15-F20：persona-override.md 的三条自律——只改 sections（tools/contexts/variables 原样透传）、不吞 next() 异常、
+ * F15-F20：三条自律——只改 sections（tools/contexts/variables 原样透传）、不吞 next() 异常、
  *          不动 name/order；以及子代理会话同样挂载、重复 agent/created 不重复挂载
  */
 {

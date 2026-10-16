@@ -41,9 +41,18 @@
 （`allowBuilds: esbuild: true`）。初次提交后，后续插件代码变更请在表中追加新的功能版本行。
 
 **文档整理（非插件功能版本，2026-09-20）**：`todo.md` 重命名为 `ops-notes.md`（`git mv`，保留历史）——
-删除原 §1「Toast 反馈效果」（仅讨论、未实现，用户决定废弃，决策留痕见 ops-notes.md），
-原 features.md「运维备忘」十一条目重排为 README.md-README.md；同步更新引用点：本文件 README.md 文件清单、CHANGELOG.md pkg-21 行、
-`cordis.patch.yml`（deployment.md）、`src/static/host.js` 注释（deployment.md）。此后 **待办/需求讨论不再单独建文件**，
-功能想法直接进 CHANGELOG.md 或 `ops-notes.md`，运维事实进 `ops-notes.md`。
+删除原「Toast 反馈效果」一节（仅讨论、未实现，用户决定废弃），原「运维备忘」十一条目重排为 1-10；
+同步更新引用点：README 文件清单、pkg-21 行、`cordis.patch.yml` 注释、`src/static/host.js` 注释。
+此后 **待办/需求讨论不再单独建文件**：功能想法直接进本文件，运维事实进 `ops-notes.md`。
+
+**文档拆分（非插件功能版本，2026-10-16）**：README 从 746 行瘦身为「项目说明 + 文档索引」，
+原内容拆为 `features.md`（功能与 UI）、`internals.md`（架构 / RPC / 占位符 / 核心机制与已知坑）、
+`deployment.md`（部署与排障）、本文件（版本历史）；全库引用改为「只写文件名」，取消章节编号引用。
+
+**文档精简（非插件功能版本，2026-10-16）**：按「只留当前有效内容」体检全部文档——
+删除 `persona-override.md`（设计使命完成，结论已并入 `internals.md` 的 persona 一节与本文件的 pkg-28 行）；
+`ops-notes.md` 去掉条目编号与历史根因叙述（207 → 64 行），只留运维事实 + 升级核查 + 排查顺序；
+`internals.md` 的已知坑删去「症状 / 根因 / 修复 / 验证」叙事，只留机制与陷阱（472 → 358 行）。
+**历史上的坑统一以本文件的 pkg 行为准**，机制现状以 `internals.md` 为准。
 
 ---

@@ -40,11 +40,10 @@ dsh plugin --profile web add file:$(pwd)   # 静态发布：走 DSH 插件安装
 | `internals.md` | 架构总览、RPC 协议、占位符规则、**核心机制与已知坑（12 条）** | **改 `src/` 之前必读** |
 | `deployment.md` | 部署步骤（动态/静态/共存）、调试手段、随包内容、数据流与安全边界 | 部署 / 排障 |
 | `CHANGELOG.md` | 功能版本历史（pkg-1..28）与编号规则 | 追溯某次改动 |
-| `ops-notes.md` | 运维备忘：环境事实、profile/bundle 同步、上游版本回归、升级核查 | 排障 / 升级 |
-| `persona-override.md` | persona 段清空 / 替换的设计依据（只保留最终方案） | 追溯设计决策 |
+| `ops-notes.md` | 运维备忘：部署事实（动态 vs 静态、`file:` 拷贝、生效时机）、上游升级核查、排查顺序 | 排障 / 升级 |
 | `AGENTS.md` | 工作区指令（供 AI 会话读取）：指向本机 DSH 源码路径 | 定位 DSH 安装路径 |
 
-`ops-notes.md` 与 `persona-override.md` 是开发侧记录，**不随包分发**（随包清单见 `deployment.md`）。
+`ops-notes.md` 是开发侧运维记录，**不随包分发**（随包清单见 `deployment.md`）。
 
 ## 源码与产物结构
 
