@@ -12,7 +12,16 @@
  *   POST /rpc/<method>   body = { type:'client-request', rpcId, method, payload }
  * handler 返回 RpcResult（{ok:true,value} / {ok:false,error:{code,message}}），
  * 由 dsh-client-connection 的 rpcFetchHandler 包装进 server-response。
+ *
+ * 本壳额外承担「设置面板落盘」的宿主能力（核心不碰 fs）：
+ *   patchPath — 本包目录下的 cordis.patch.yml（DSH 的 bundlePatchPaths 就是
+ *               join(包目录, package.json 里 dsh.bundle.patch 的值)）；
+ *   readText / writeText — 受管块的读与**原子写**（临时文件 + rename）。
  */
+import { readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import * as YAML from 'yaml'
 import { hostCore } from '../core/host.js'
 
 /** Cordis 插件名（Loader entry，与 cordis.patch.yml 的 insert id 一致）。 */
@@ -28,8 +37,57 @@ export const name = 'dsh-profile-selector'
  */
 export const inject = ['connection', 'webServer']
 
-/** 插件入口：执行 Host 半区注册逻辑。 */
-export function apply(ctx) {
+/**
+ * 本包目录 = lib/index.js 的上一级（打包后 import.meta.url 指向 lib/index.js）。
+ * 设置受管块就写在这里的 cordis.patch.yml —— 也就是本插件**自己的 bundle patch**，
+ * 不碰 profile 层的 `$DSH_HOME/profiles/<name>/cordis.patch.yml`（那是用户的补丁层）。
+ */
+const PACKAGE_DIR = dirname(dirname(fileURLToPath(import.meta.url)))
+
+/** 设置受管块所在文件。 */
+const PATCH_PATH = join(PACKAGE_DIR, 'cordis.patch.yml')
+
+/**
+ * 读受管块所在文件：**只有** ENOENT（文件被删）才返回空串——那表示可以按空模板
+ * 重新生成（`replaceManagedBlock('', block)` 只写受管块）。其它读失败一律抛出，
+ * 绝不能把读不到的内容当成空文件覆盖掉——那是「用户配置被清空」的事故。
+ */
+async function readPatchText(path) {
+  try {
+    return await readFile(path, 'utf8')
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return ''
+    throw error
+  }
+}
+
+/**
+ * 原子写：同目录临时文件 + rename（rename 在 Windows 上覆盖已存在文件可能失败，
+ * 退化为 rm + rename）。失败时清掉临时文件，原文件保持不动。
+ */
+async function writePatchText(path, text) {
+  const temp = join(dirname(path), '.' + basename(path) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8))
+  try {
+    await writeFile(temp, text, 'utf8')
+    try {
+      await rename(temp, path)
+    } catch (error) {
+      const code = error && error.code
+      if (code !== 'EPERM' && code !== 'EEXIST' && code !== 'EACCES') throw error
+      await rm(path, { force: true })
+      await rename(temp, path)
+    }
+  } finally {
+    await rm(temp, { force: true }).catch(() => {})
+  }
+}
+
+/**
+ * 插件入口：执行 Host 半区注册逻辑。
+ * @param config - cordis.patch.yml 里本行 `config:` 的值（设置的**出厂默认层**）；
+ *                 设置面板保存时会往同一份 patch 文件追加受管块覆盖它。
+ */
+export function apply(ctx, config) {
   const connection = ctx.get('connection')
   if (connection === undefined) return
   // method -> 业务 handler 表：核心每次调用适配器 handle 都登记一条。
@@ -80,6 +138,13 @@ export function apply(ctx) {
         }
       }
     },
+  }, {
+    config,
+    patchPath: PATCH_PATH,
+    readText: readPatchText,
+    writeText: writePatchText,
+    // YAML 能力：核心不做任何手写 YAML 语法处理，读写全部交给 yaml 库
+    yaml: YAML,
   })
 }
 // 注意：不要 `export default apply`。DSH 0.1.2-alpha.2 的 loader `unwrapExports` 会优先取

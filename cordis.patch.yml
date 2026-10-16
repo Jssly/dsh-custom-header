@@ -14,24 +14,43 @@
 # 影子 Context，解析从 connection 插件 fiber 向上，调用方 inject 无效；
 # 详见 internals.md / ops-notes.md。）
 #
-# 顶层条目（与 - insert: 平级）：按 id 命中已存在的 loader 行做 config 覆盖。
-# 关掉 DSH 第一方开场白 "You are an AI agent powered by DeepSeek Harness."
-# （system prompt 的第 1 句；第 2 句 persona 段由 Host 半区的装配监听器处理，
-# 见 internals.md / ops-notes.md）。要点：
-#   · ⚠️ **不要写 `name`**：顶层条目按 id 命中既有行；写了 name 会被当成「新增行」
-#     解析，报「disabling profile plugin row …: its declared dsh requirements
-#     cannot be validated: Cannot read properties of undefined (reading 'startsWith')」；
-#   · 本 patch 是 **bundle 层**；`~/.dsh/profiles/web/cordis.patch.yml`（profile 层）
-#     在所有 bundle 层之后应用、优先级更高。**两处只能写一处**——都写时 profile 那条
-#     会整块盖掉本条目（属「配置不生效」类疑难杂症的源头）。本条已搬入本文件，
-#     profile patch 里原有的同款覆盖**必须删除**；
-#   · 本条目会替换 web-app 层给 host 设的 `personaPrefix`（host 层 persona 回落为 ""）：
-#     Web 会话无感（被 preset 的 persona 行 shadow），只影响 TUI 那类无 preset 的场景；
-#   · 需**重启 `dsh web`** 生效（bundle patch 只在启动时应用，新建会话不算）。
-- id: system-prompt
-  config:
-    includeHarnessIdentity: false
+# config —— 提示词的**出厂默认层**。三层设置的优先级（见 core/settings.js）：
+#
+#     内置默认  ←  本行的 config  ←  工作区 .deepseek.yaml 的 workspace 段
+#
+# 高者**按字段**覆盖低者（「值覆盖」：工作区只写 persona_clear，不影响 global_prompt）。
+#
+# 设置面板（DSH 设置 → 提示词档案）编辑的就是这一层：保存时把新值写进**本文件末尾的
+# 受管块**——由一对 `# >>> …:settings:begin` / `# <<< …:settings:end` 整行标记夹住
+# （此处故意不写全标记字面量：标记按**整行**精确匹配识别，而注释里出现完整标记会让人
+# 误以为文件里已经有块；识别规则与历史坑见 src/core/patch.js 的「标记识别」小节）。
+# 受管块是一个顶层 `- id: dsh-profile-selector` 覆盖条目，按 id 命中下面 insert
+# 定义的行。⚠️ 同一份 patch 里「先 insert、后同 id 顶层覆盖」成立（DSH 的
+# applyEntryPatches 会把 insert 的行即时建索引），且覆盖对 `config` 是**整块替换**
+# 而非深合并——所以受管块必须写全三个键，不能只写改动项。
+#
+# 三项的语义与默认值：
+#   global_prompt           开场白覆盖文件；空串 = 不覆盖（默认）。
+#                           插件层写**绝对路径**（这是插件的全局设置）；
+#                           工作区层写**相对会话 cwd** 的路径（与档案 file 规则一致）。
+#   persona_clear           true（默认）= 清空 preset 自带的第 2 句
+#                           "You are a coding agent powered by the {{model}} model."；
+#                           false = 保留原句。
+#   includeHarnessIdentity  false（默认）= 关闭 DSH 第一方开场白（第 1 句）
+#                           "You are an AI agent powered by DeepSeek Harness."；
+#                           true = 保留。
+#
+# ⚠️ 本文件不再有顶层 `- id: system-prompt / config: includeHarnessIdentity: false`。
+# 那句英文的开关已由本插件接管：DSH 的 system-prompt 只在**构造时**读自己的 config，
+# 运行期改不了，而该段只注册在 global 层，所以插件在本会话的 agent 作用域注册同名
+# `harness:identity` 段做 shadow —— 等效于那个布尔开关，且改完**不用重启 dsh web**、
+# 还能按工作区覆盖。可见效果与原来的 `includeHarnessIdentity: false` 完全一致
+# （本插件默认值就是 false）。
 - insert:
     - id: dsh-profile-selector
       name: dsh-profile-selector
       inject: [connection, webServer]
+      config:
+        global_prompt: ""
+        persona_clear: true
+        includeHarnessIdentity: false

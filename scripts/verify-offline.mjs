@@ -1,17 +1,22 @@
 /**
  * dsh-profile-selector — 离线验证脚本（无需 DSH 运行时）
  *
- * 覆盖六块：
+ * 覆盖八块：
  *   A. 真实 .deepseek.yaml 结构守护（不写死档案名/文件名）+ 迷你 YAML 解析器（block sequence 与既有 map/标量行为）
  *   B. 档案 file 支持 string | string[]：按声明顺序合并、任一文件缺失即整体失败
- *   C. workspace.global_prompt：未配置 / 文件不存在 / 文件为空 → 不覆盖并清理残留
+ *   C. 开场白 `harness:identity` 的三种落点（覆盖正文 / 空串压掉 / 不注册保留 DSH 原句）+
+ *      读盘失败不改开关语义 + 工作区覆盖开关 —— 见 core/settings.js / internals.md
  *   D. 既有行为回归：单文件档案、temperature 注入、幂等、pending 延迟激活
  *   E. 子代理会话档案继承（继承父会话档案 / 回退 default / 不注入普通会话 / 显式优先）+ 未激活会话排队语义
  *      （sessionPersistence 快照按 header.id 匹配、cwd 兜底、不报红字）——见 internals.md
- *   F. workspace.persona_prompt / persona_clear：`system-prompt/assemble` 监听器改写
- *      `deployment:persona-prefix` 段（**默认清空** / 显式 clear:false 才保留 / 替换 /
+ *   F. persona 段（`deployment:persona-prefix`）：`system-prompt/assemble` 监听器改写
+ *      （**默认清空** / 显式 clear:false 才保留 / persona_prompt 替换 /
  *      无 .deepseek.yaml 也清空 / 每次装配重新求值 / 只改 sections / 异常不吞 / 段名落空诊断）
  *      ——见 internals.md
+ *   G. 三层设置（内置默认 ← 插件 config ← 工作区 workspace 段，逐字段覆盖）+ 设置面板
+ *      `<prefix>.settings` / `.settings.set`（内存立即生效、落盘受管块、非法入参拒绝）+
+ *      core/patch.js 受管块纯函数（生成/解析往返、`[]` 模板、标记不完整拒写）——见 core/settings.js
+ *   H. Client 半区槽注册契约（settings.section 的 options、组件不崩、下拉框槽位回归）
  *
  * 维护须知：对**工作区真实配置**的断言只做结构守护（用户可随时增删档案、改 file 写法）；真实读盘路径
  * 由 A4-A6 用 realFs 端到端覆盖。历史教训：旧 A1-A3 写死了档案名与文件名，2026-09-15 配置改写后即整体失效。
@@ -21,8 +26,12 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { parseYaml } from '../src/core/yaml.js'
+import * as YAML from 'yaml'
 import { hostCore } from '../src/core/host.js'
+import { clientCore } from '../src/core/client.js'
+import { settingsClientCore } from '../src/core/settings-client.js'
+import { DEFAULT_SETTINGS, normalizeLayer, resolveSettings } from '../src/core/settings.js'
+import { SETTINGS_BLOCK_BEGIN, SETTINGS_BLOCK_END, applySettingsToPatch, generateSettingsBlock, parseSettingsPatch, replaceManagedBlock } from '../src/core/patch.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SECTION = 'dsh-profile:profile'
@@ -60,6 +69,14 @@ function makeEnv(opts) {
   const rpcHandlers = new Map()
   const listeners = new Map()
   const agents = new Map()
+  // 提示词设置的插件层（deps.config = cordis.patch.yml 里本行的 config）；
+  // 未给时按「没有 config」处理（= 全部走内置默认）。
+  const pluginConfig = o.config
+  // 受管块所在文件（模拟本插件自己的 bundle patch）：给了 patchPath 才启用落盘能力，
+  // 用内存字符串模拟磁盘内容，写操作记录在 patchWrites 里供断言。
+  const patchPath = typeof o.patchPath === 'string' && o.patchPath.length > 0 ? o.patchPath : null
+  let patchFile = typeof o.patchFile === 'string' ? o.patchFile : ''
+  const patchWrites = []
 
   const fs = {
     async resolve(rel, args) {
@@ -78,7 +95,8 @@ function makeEnv(opts) {
     get(name) {
       if (name === 'fs') return fs
       if (name === 'sandboxPolicy') return { workspaceRoot: '/deploy-root' }
-      if (name === 'agents') return { get: (id) => agents.get(id) }
+      // list() 供「设置变更后对活跃会话重新求值」使用（真实 DSH 的 AgentRegistry 亦有）
+      if (name === 'agents') return { get: (id) => agents.get(id), list: () => [...agents.values()] }
       if (name === 'sessions') return { get: (id) => (memSessions.has(id) ? { id } : undefined) }
       if (name === 'sessionPersistence') {
         return persistence === undefined ? undefined : { list: async () => persistence }
@@ -96,6 +114,16 @@ function makeEnv(opts) {
     handle(method, handler) {
       rpcHandlers.set(method, handler)
       return () => rpcHandlers.delete(method)
+    },
+  }, {
+    yaml: YAML,
+    config: pluginConfig,
+    patchPath,
+    // 落盘能力只在给了 patchPath 时注入（与真实壳一致：动态模式没有 writeText）
+    readText: patchPath === null ? undefined : async () => patchFile,
+    writeText: patchPath === null ? undefined : async (_p, text) => {
+      patchFile = text
+      patchWrites.push(text)
     },
   })
 
@@ -169,7 +197,11 @@ function makeEnv(opts) {
     if (!h) throw new Error('no rpc handler: ' + method)
     return h(args)
   }
-  return { files, cwd, logs, makeAgent, created, assemble, rpc }
+  return {
+    files, cwd, logs, makeAgent, created, assemble, rpc,
+    patchWrites,
+    readPatch: () => patchFile,
+  }
 }
 
 /* ---------------- A. YAML 解析 + 真实 .deepseek.yaml 守护 ---------------- */
@@ -178,7 +210,7 @@ function makeEnv(opts) {
   // 改 file 写法（2026-09-15 把 file 改成数组时，写死具体值的旧 A1-A3 就整体失效了——
   // 这正是本次修正的来源）。真实配置 + 真实档案文件的端到端解析由 A4-A6 覆盖。
   const raw = readFileSync(join(ROOT, '.deepseek.yaml'), 'utf8')
-  const real = parseYaml(raw)
+  const real = YAML.parse(raw)
   const prompts = real.workspace && real.workspace.system_prompts
   ok('A1 真实 .deepseek.yaml：system_prompts 为非空对象',
     !!prompts && typeof prompts === 'object' && Object.keys(prompts).length > 0, JSON.stringify(prompts))
@@ -207,13 +239,6 @@ function makeEnv(opts) {
   ok('A6 真实档案正文读盘并注册 section',
     ra.ok === true && ((((realAgent.scoped.get(SECTION) || {}).text) || '').length > 0), JSON.stringify(ra))
 
-  eq('A7 标量类型（数字/引号/布尔/null）', parseYaml('a: 1\nb: "q"\nc: true\nd: null\n'), { a: 1, b: 'q', c: true, d: null })
-  eq('A8 缩进列表', parseYaml('a:\n  b:\n    - x\n    - y\n  c: 1\n'), { a: { b: ['x', 'y'], c: 1 } })
-  eq('A9 零缩进列表（- 与 key 同缩进）', parseYaml('file:\n- a\n- b\nname: n\n'), { file: ['a', 'b'], name: 'n' })
-  eq('A10 列表之后接同级 map 键', parseYaml('p:\n  file:\n    - f1\n    - f2\n  name: "t"\n'), { p: { file: ['f1', 'f2'], name: 't' } })
-  eq('A11 空值键无子项仍为对象', parseYaml('a:\nb: 1\n'), { a: {}, b: 1 })
-  eq('A12 注释与空行忽略', parseYaml('# c\n\na: 1\n\n'), { a: 1 })
-  eq('A13 单文件（标量）仍是字符串', parseYaml('file: doc/prompts/dev.md\n'), { file: 'doc/prompts/dev.md' })
 
   // A14-A15：persona 段覆盖的真实配置守护——**不写死具体值**（用户可随时在
   // persona_prompt / persona_clear / 两者都不写 之间切换，断言跟着配置走）
@@ -245,6 +270,40 @@ function makeEnv(opts) {
   ok('A15 真实配置下 persona 段装配结果与配置一致（' + PERSONA_KEY + '）',
     realPersonaText === expectedPersona,
     'got=' + JSON.stringify(realPersonaText) + ' want=' + JSON.stringify(expectedPersona))
+}
+
+/* ---------------- A7-A15：YAML 输入契约（插件依赖的写法，换库后必须照样成立） ----------------
+ * 这组不是「测 yaml 库的本事」，而是钉住**插件所依赖的输入形态**——`.deepseek.yaml` 的真实写法。
+ * 2026-10-17 把解析从手写迷你解析器换成 `yaml` 库，这组断言就是**向后兼容的证明**：
+ * 同一份输入，库解析出的结构必须与插件此前的期望一致（唯一差异见 A11 注释）。
+ * `file` 的 string | string[] 两种形态是本组的重点（B 组再从 profiles 输出侧验一遍）。
+ */
+{
+  eq('A7 标量类型（数字/引号/布尔/null）—— temperature 依赖它',
+    YAML.parse('a: 1\nb: "q"\nc: true\nd: null\n'), { a: 1, b: 'q', c: true, d: null })
+  eq('A8 file：缩进数组写法',
+    YAML.parse('file:\n  - a.md\n  - b.md\n'), { file: ['a.md', 'b.md'] })
+  eq('A9 file：零缩进数组写法（pkg-26 修过的坑，库原生支持）',
+    YAML.parse('file:\n- a.md\n- b.md\nname: n\n'), { file: ['a.md', 'b.md'], name: 'n' })
+  eq('A10 file 数组之后接同级 map 键（真实配置的形态）',
+    YAML.parse('p:\n  file:\n    - f1\n    - f2\n  name: "t"\n'), { p: { file: ['f1', 'f2'], name: 't' } })
+  // ⚠️ 与手写解析器的**唯一差异**：空值键手写实现给 `{}`，库给 `null`。
+  // 对插件无影响——所有消费点都做了 null 检查（见 A11b/A11c）。
+  eq('A11 空值键：库解析为 null（与旧手写实现的 {} 不同，见下两条）',
+    YAML.parse('a:\nb: 1\n'), { a: null, b: 1 })
+  eq('A11b 空值 file → 档案不进 profiles（不因 null 崩）',
+    (await makeEnv({ files: { '/ws/.deepseek.yaml': 'workspace:\n  system_prompts:\n    x:\n      file:\n' } })
+      .rpc('profiles', { sessionId: 'a11b', cwd: '/ws' })).profiles.length, 0)
+  eq('A12 注释与空行忽略', YAML.parse('# c\n\na: 1\n\n'), { a: 1 })
+  eq('A13 file：单文件标量仍是字符串', YAML.parse('file: doc/prompts/dev.md\n'), { file: 'doc/prompts/dev.md' })
+  eq('A13b file：引号包裹的数组元素（去引号）',
+    YAML.parse('file:\n  - "a.md"\n  - \'b.md\'\n'), { file: ['a.md', 'b.md'] })
+  eq('A13c 空数组 file → 档案不进 profiles',
+    (await makeEnv({ files: { '/ws/.deepseek.yaml': 'workspace:\n  system_prompts:\n    x:\n      file: []\n' } })
+      .rpc('profiles', { sessionId: 'a13c', cwd: '/ws' })).profiles.length, 0)
+  // 多行块标量：库支持（旧手写解析器不支持）——档案正文若这样写也能用
+  eq('A13d 多行块标量（旧手写解析器不支持的写法，库支持）',
+    YAML.parse('x: |\n  line1\n  line2\n'), { x: 'line1\nline2\n' })
 }
 
 /* ---------------- B. 档案 file 多文件合并 ---------------- */
@@ -294,7 +353,13 @@ function makeEnv(opts) {
   ok('B15 错误信息含序号与文件名', typeof r2.error === 'string' && r2.error.indexOf('2/2') !== -1 && r2.error.indexOf('p/missing.md') !== -1, r2.error)
 }
 
-/* ---------------- C. global_prompt：未配置/文件不存在即不覆盖 ---------------- */
+/* ---------------- C. 开场白 harness:identity 的三种落点 ----------------
+ * 落点由三层设置求值（见 core/settings.js / host.js 的 resolveIdentity）：
+ *   有可读的 global_prompt 正文 → text（用自己的话替换那句）
+ *   否则 includeHarnessIdentity === false（内置默认）→ ''（压掉那句；段仍在，渲染时被过滤）
+ *   否则 includeHarnessIdentity === true → 不注册（保留 DSH 默认那句）
+ * 读盘失败/文件为空**不改变开关语义**，只记一条 warn。
+ */
 {
   // brokenDisposer=true：模拟真实运行时 disposer 静默失效，验证 forceCleanSection 兜底
   const env = makeEnv({
@@ -309,16 +374,18 @@ function makeEnv(opts) {
   ok('C1 有效配置 → 注册 harness:identity 覆盖', (scoped.get(IDENTITY) || {}).text === '覆盖正文', JSON.stringify([...scoped.keys()]))
   eq('C2 覆盖 order 对齐 DSH 开幕式', (scoped.get(IDENTITY) || {}).order, -1000)
   eq('C3 state.globalPrompt 反映生效文件', (await env.rpc('state', { sessionId: 's-id' })).globalPrompt, 'p/global.md')
+  eq('C3b state.identityMode 标出落点', (await env.rpc('state', { sessionId: 's-id' })).identityMode, 'text')
 
   env.files['/ws/.deepseek.yaml'] = 'workspace:\n  name: x\n'
   await env.created(agent)
-  ok('C4 配置缺失（键不存在）→ 不覆盖且无残留', !scoped.has(IDENTITY), 'still=' + JSON.stringify([...scoped.keys()]))
+  ok('C4 配置缺失 → 默认关闭：注册空串覆盖（压掉那句英文）', (scoped.get(IDENTITY) || {}).text === '', 'still=' + JSON.stringify([...scoped.keys()]))
   ok('C5 DSH 全局开场白未被破坏', global.has(IDENTITY))
-  eq('C6 state.globalPrompt 归 null', (await env.rpc('state', { sessionId: 's-id' })).globalPrompt, null)
+  eq('C6 state.globalPrompt 归 null（无覆盖源）', (await env.rpc('state', { sessionId: 's-id' })).globalPrompt, null)
+  eq('C6b state.identityMode = blank', (await env.rpc('state', { sessionId: 's-id' })).identityMode, 'blank')
 
   env.files['/ws/.deepseek.yaml'] = 'workspace:\n  global_prompt: p/nope.md\n'
   await env.created(agent)
-  ok('C7 文件不存在 → 不覆盖', !scoped.has(IDENTITY), JSON.stringify([...scoped.keys()]))
+  ok('C7 文件不存在 → 开关语义不变（仍按默认关闭 = 空串）', (scoped.get(IDENTITY) || {}).text === '', JSON.stringify([...scoped.keys()]))
   ok('C8 文件不存在 → 记 warn', env.logs.some((m) => m.indexOf('global_prompt 文件读取失败') !== -1), JSON.stringify(env.logs))
 
   env.files['/ws/.deepseek.yaml'] = 'workspace:\n  global_prompt: p/global.md\n'
@@ -327,7 +394,7 @@ function makeEnv(opts) {
 
   env.files['/ws/p/global.md'] = '   '
   await env.created(agent)
-  ok('C10 文件被清空 → 不覆盖（无残留）', !scoped.has(IDENTITY), JSON.stringify([...scoped.keys()]))
+  ok('C10 文件被清空 → 按开关处理（默认关闭 = 空串）', (scoped.get(IDENTITY) || {}).text === '', JSON.stringify([...scoped.keys()]))
 
   env.files['/ws/.deepseek.yaml'] = 'workspace:\n  global_prompt: p/global.md\n'
   env.files['/ws/p/global.md'] = 'X'
@@ -335,17 +402,35 @@ function makeEnv(opts) {
   ok('C11 再次恢复 → 重新注册', (scoped.get(IDENTITY) || {}).text === 'X')
   delete env.files['/ws/p/global.md']
   await env.created(agent)
-  ok('C12 文件被删除 → 不覆盖', !scoped.has(IDENTITY), JSON.stringify([...scoped.keys()]))
+  ok('C12 文件被删除 → 按开关处理（默认关闭 = 空串）', (scoped.get(IDENTITY) || {}).text === '', JSON.stringify([...scoped.keys()]))
   ok('C13 global 层始终未被触碰', global.has(IDENTITY))
 
-  // global_prompt 值类型非法（列表）也算未配置
+  // global_prompt 值类型非法（列表）也算本层未设置
   const env3 = makeEnv({
     files: { '/ws/.deepseek.yaml': 'workspace:\n  global_prompt:\n    - a.md\n    - b.md\n' },
     brokenDisposer: true,
   })
   const a3 = env3.makeAgent('s-arr')
   await env3.created(a3.agent)
-  ok('C14 global_prompt 非字符串 → 视为未配置', !a3.scoped.has(IDENTITY), JSON.stringify([...a3.scoped.keys()]))
+  ok('C14 global_prompt 非字符串 → 本层未设置（余下按开关）', (a3.scoped.get(IDENTITY) || {}).text === '', JSON.stringify([...a3.scoped.keys()]))
+
+  // 插件 config 打开开关（等价于原顶层 patch 的 includeHarnessIdentity: true）→ 不注册，保留 DSH 原句
+  const env5 = makeEnv({
+    config: { includeHarnessIdentity: true },
+    files: { '/ws/.deepseek.yaml': 'workspace:\n  name: x\n' },
+  })
+  const a5 = env5.makeAgent('s-keep')
+  await env5.created(a5.agent)
+  ok('C15 includeHarnessIdentity: true → 不注册覆盖（保留 DSH 默认那句）', !a5.scoped.has(IDENTITY), JSON.stringify([...a5.scoped.keys()]))
+  eq('C16 state.identityMode = keep', (await env5.rpc('state', { sessionId: 's-keep' })).identityMode, 'keep')
+  ok('C17 插件层 true 时不再注册覆盖（与默认 false 互为反操作）', !a5.scoped.has(IDENTITY))
+  const env5b = makeEnv({
+    config: { includeHarnessIdentity: true },
+    files: { '/ws/.deepseek.yaml': 'workspace:\n  includeHarnessIdentity: false\n' },
+  })
+  const a5b = env5b.makeAgent('s-ws-off')
+  await env5b.created(a5b.agent)
+  ok('C18 工作区 includeHarnessIdentity: false 覆盖插件的 true', (a5b.scoped.get(IDENTITY) || {}).text === '', JSON.stringify([...a5b.scoped.keys()]))
 }
 
 /* ---------------- D. 回归：单文件档案 / temperature / 幂等 / pending ---------------- */
@@ -587,6 +672,283 @@ function makeEnv(opts) {
   await envSub.created(cs.agent)
   ok('F21 子代理会话同样挂上装配监听器', cs.assembleHandlers.length === 1, String(cs.assembleHandlers.length))
   eq('F22 子代理会话的 persona 段同样被清空', personaTextOf(await envSub.assemble(cs.agent, makeAssembly())), '')
+}
+
+/* ---------------- G. 三层设置 + 设置面板 RPC + bundle patch 受管块 ----------------
+ * 三层（见 core/settings.js）：内置默认 ← 插件 config（cordis.patch.yml 的 config 行）
+ * ← 工作区 .deepseek.yaml 的 workspace 段；高者**按字段**覆盖。
+ * 设置面板（settings.section）经 `<prefix>.settings` / `.settings.set` 读写插件层；
+ * 保存 = 更新内存（活跃会话立即重算）+ 往本插件 bundle patch 写受管块（持久化）。
+ */
+{
+  // G1-G3：settings RPC 的形状与插件层取值
+  const env0 = makeEnv({})
+  const r0 = await env0.rpc('settings', {})
+  eq('G1 无 config 时 settings 返回内置默认', r0.values, DEFAULT_SETTINGS)
+  eq('G2 defaults 暴露内置默认', r0.defaults, DEFAULT_SETTINGS)
+  eq('G3 keys 固定三键顺序', r0.keys, ['global_prompt', 'persona_clear', 'includeHarnessIdentity'])
+  eq('G4 未注入落盘能力 → writable false', r0.writable, false)
+
+  const env1 = makeEnv({ config: { global_prompt: '/opt/g.md', includeHarnessIdentity: true } })
+  const r1 = await env1.rpc('settings', {})
+  eq('G5 插件 config 逐字段覆盖内置默认', r1.values,
+    { global_prompt: '/opt/g.md', persona_clear: true, includeHarnessIdentity: true })
+
+  // G6-G7：工作区层按字段覆盖插件层（只写一个键，其它键沿用插件层）
+  eq('G6 归一化只收三个键且校验类型',
+    normalizeLayer({ global_prompt: '  a.md  ', persona_clear: 'yes', includeHarnessIdentity: true, nope: 1 }),
+    { global_prompt: 'a.md', includeHarnessIdentity: true })
+  eq('G7 逐字段值覆盖（工作区只写 persona_clear）',
+    resolveSettings({ global_prompt: '/opt/g.md', includeHarnessIdentity: true }, { persona_clear: false }),
+    { global_prompt: '/opt/g.md', persona_clear: false, includeHarnessIdentity: true })
+
+  // G8：工作区的 global_prompt 是相对会话 cwd 的路径，且覆盖插件层的绝对路径
+  const env2 = makeEnv({
+    config: { global_prompt: '/opt/never.md' },
+    files: { '/ws/.deepseek.yaml': 'workspace:\n  global_prompt: p/ws.md\n', '/ws/p/ws.md': '工作区正文' },
+  })
+  const a2 = env2.makeAgent('g-ws')
+  await env2.created(a2.agent)
+  ok('G8 工作区 global_prompt 覆盖插件层', (a2.scoped.get(IDENTITY) || {}).text === '工作区正文',
+    JSON.stringify([...a2.scoped.keys()]) + ' logs=' + JSON.stringify(env2.logs))
+  eq('G8b profiles.globalPrompt 报出覆盖源', (await env2.rpc('profiles', { sessionId: 'g-ws' })).globalPrompt, 'p/ws.md')
+  eq('G8c profiles.sources 报出每个字段来自哪一层', (await env2.rpc('profiles', { sessionId: 'g-ws' })).sources,
+    { global_prompt: 'workspace', persona_clear: 'default', includeHarnessIdentity: 'default' })
+
+  // G9：工作区 persona_clear 覆盖插件层（面板设 true，工作区要保留原句）
+  const env3 = makeEnv({
+    config: { persona_clear: true },
+    files: { '/ws/.deepseek.yaml': 'workspace:\n  persona_clear: false\n' },
+  })
+  const a3 = env3.makeAgent('g-persona')
+  await env3.created(a3.agent)
+  ok('G9 工作区 persona_clear: false 覆盖插件层的 true（保留原句）', a3.assembleHandlers.length === 1)
+
+  // G10-G13：settings.set —— 内存生效 + 落盘受管块
+  const PATCH = '/pkg/cordis.patch.yml'
+  const ORIGINAL = '# 本插件自带的 bundle patch\n- insert:\n    - id: dsh-profile-selector\n      name: dsh-profile-selector\n'
+  const env4 = makeEnv({ patchPath: PATCH, patchFile: ORIGINAL, files: { '/ws/.deepseek.yaml': 'workspace:\n  name: x\n' } })
+  const a4 = env4.makeAgent('g-set')
+  await env4.created(a4.agent)
+  ok('G10 默认关闭 → 空串覆盖', (a4.scoped.get(IDENTITY) || {}).text === '')
+
+  const saved = await env4.rpc('settings.set', {
+    values: { global_prompt: '', persona_clear: false, includeHarnessIdentity: true },
+  })
+  eq('G11 保存成功并回新值', saved.values, { global_prompt: '', persona_clear: false, includeHarnessIdentity: true })
+  eq('G11b 落盘标记 writable true 且无 warning', [saved.writable, saved.warning], [true, null])
+  ok('G12 活跃会话立即重算：includeHarnessIdentity 转 true → 覆盖被卸载', !a4.scoped.has(IDENTITY),
+    JSON.stringify([...a4.scoped.keys()]))
+
+  const written = env4.readPatch()
+  ok('G13 受管块已写入且标记外内容逐字节保留',
+    written.startsWith(ORIGINAL) && written.indexOf(SETTINGS_BLOCK_BEGIN) > ORIGINAL.length
+    && written.indexOf(SETTINGS_BLOCK_END) > written.indexOf(SETTINGS_BLOCK_BEGIN), JSON.stringify(written))
+  eq('G14 受管块可被解析回同样的值（生成/解析往返）', parseSettingsPatch(written, YAML),
+    { global_prompt: '', persona_clear: false, includeHarnessIdentity: true })
+  ok('G15 受管块只含一个顶层覆盖条目且不写 name（DSH patch 约定）',
+    written.indexOf('- id: dsh-profile-selector\n  config:') !== -1
+    && written.slice(written.indexOf(SETTINGS_BLOCK_BEGIN)).indexOf('name:') === -1)
+
+  // 二次保存：原地替换受管块，不追加第二份
+  await env4.rpc('settings.set', { values: { global_prompt: '/opt/中文 路径.md', persona_clear: true, includeHarnessIdentity: false } })
+  const written2 = env4.readPatch()
+  eq('G16 二次保存原地替换（受管块只有一个）',
+    written2.split(SETTINGS_BLOCK_BEGIN).length - 1, 1)
+  eq('G17 含空格与中文的路径可安全往返', parseSettingsPatch(written2, YAML),
+    { global_prompt: '/opt/中文 路径.md', persona_clear: true, includeHarnessIdentity: false })
+  ok('G18 自定义 global_prompt 落到会话上（绝对路径直读）',
+    (await env4.rpc('profiles', { sessionId: 'g-set' })).globalPrompt === '/opt/中文 路径.md')
+
+  // G19-G21：无落盘能力（动态模式）→ 仅内存 + 明确 warning；非法入参被拒
+  const env5 = makeEnv({ files: { '/ws/.deepseek.yaml': 'workspace:\n  name: x\n' } })
+  const saved5 = await env5.rpc('settings.set', {
+    values: { global_prompt: '', persona_clear: true, includeHarnessIdentity: true },
+  })
+  eq('G19 无 patchPath → ok 但 writable false', [saved5.ok, saved5.writable], [true, false])
+  ok('G20 无 patchPath → 提示仅在本次运行生效', typeof saved5.warning === 'string' && saved5.warning.indexOf('重启') !== -1, saved5.warning)
+  eq('G21 内存仍已生效', (await env5.rpc('settings', {})).values.includeHarnessIdentity, true)
+
+  const bad1 = await env5.rpc('settings.set', { values: { global_prompt: 'x' } })
+  eq('G22 缺字段的入参被拒', [bad1.ok, typeof bad1.error === 'string'], [false, true])
+  const bad2 = await env5.rpc('settings.set', {})
+  eq('G23 无 values 的入参被拒', bad2.ok, false)
+  const bad3 = await env5.rpc('settings.set', { values: { global_prompt: 1, persona_clear: true, includeHarnessIdentity: false } })
+  eq('G24 类型不符的字段被拒', bad3.ok, false)
+
+  // G25-G29：受管块纯函数（core/patch.js）
+  const block = generateSettingsBlock({ global_prompt: '/a"b.md', persona_clear: true, includeHarnessIdentity: false }, YAML)
+  ok('G25 生成的块含首尾标记', block.startsWith(SETTINGS_BLOCK_BEGIN) && block.trimEnd().endsWith(SETTINGS_BLOCK_END))
+  eq('G27 空 profile 模板 [] 被受管块替换（不拼出 [] - insert）',
+    replaceManagedBlock('[]\n', block).trimStart().startsWith(SETTINGS_BLOCK_BEGIN), true)
+  eq('G28 无标记的文件追加到末尾', replaceManagedBlock(ORIGINAL, block).indexOf(SETTINGS_BLOCK_BEGIN) > ORIGINAL.length, true)
+  eq('G29 删除受管块后只剩注释 → 补回 []', replaceManagedBlock(SETTINGS_BLOCK_BEGIN + '\n' + SETTINGS_BLOCK_END + '\n', '').trim(), '[]')
+  let threw = false
+  try { replaceManagedBlock(SETTINGS_BLOCK_BEGIN + '\n', block) } catch (e) { threw = true }
+  ok('G30 标记不完整时拒写（不猜用户意图）', threw)
+  eq('G31 未写过受管块 → parseSettingsPatch 返回 null', parseSettingsPatch(ORIGINAL, YAML), null)
+
+  // G32-G36：标记识别必须按**整行**，不能被注释里的标记字面量误命中。
+  // 历史 bug（2026-10-16 实际发生）：cordis.patch.yml 的说明性注释里写了完整的 begin 字面量
+  // （`# 受管块**（文件末尾 \`# >>> …:begin\` … \`:end\` 之间）`），旧的 indexOf 实现命中注释那个
+  // begin、却找不到 end → 每次保存都报「受管块标记不完整」，用户看到「已在本次运行生效，但写入失败」，
+  // 配置永远落不了盘（重启即回退）。
+  // 辅助：统计**整行等于标记**的行数（与 core/patch.js 的判据一致）。
+  // ⚠️ 不能用 indexOf / split 计数：注释里可能引用标记字面量，子串判据会把注释也算进去
+  // ——那正是下面这个 bug 的成因，测试自己当然也不能犯。
+  const markerLines = (text, marker) => String(text).split('\n').filter((line) => line.trim() === marker).length
+
+  const COMMENT_WITH_BEGIN = '# 说明：受管块在 `' + SETTINGS_BLOCK_BEGIN + '` 之后（这行只是注释）\n'
+  // 把「不该抛错」的调用包起来：被测代码一旦抛错，应记为该断言失败并继续跑完其余项，
+  // 而不是让整个脚本中断（反向对照时才看得到全部失败项）。
+  const attempt = (fn) => { try { return { value: fn() } } catch (e) { return { error: String((e && e.message) || e) } } }
+  const noBlock = attempt(() => parseSettingsPatch(COMMENT_WITH_BEGIN + ORIGINAL, YAML))
+  eq('G32 注释里含 begin 字面量 → 不算标记（视为无块）', [noBlock.error === undefined, noBlock.value], [true, null])
+  const appendedRun = attempt(() => replaceManagedBlock(COMMENT_WITH_BEGIN + ORIGINAL, block))
+  ok('G32b 注释含 begin 字面量时写入不报错', appendedRun.error === undefined, String(appendedRun.error))
+  const appended = appendedRun.value || ''
+  eq('G33 注释含 begin 字面量时仍能正常追加受管块（整行标记恰好一对）',
+    [markerLines(appended, SETTINGS_BLOCK_BEGIN), markerLines(appended, SETTINGS_BLOCK_END)], [1, 1])
+  ok('G33b 受管块落在文件末尾', appended.trimEnd().split('\n').slice(-1)[0] === SETTINGS_BLOCK_END,
+    JSON.stringify(appended.slice(-40)))
+  eq('G34 追加后可被解析回读（往返）', parseSettingsPatch(appended, YAML),
+    { global_prompt: '/a"b.md', persona_clear: true, includeHarnessIdentity: false })
+  const twice = replaceManagedBlock(appended, generateSettingsBlock({ global_prompt: '/c.md', persona_clear: false, includeHarnessIdentity: false }, YAML))
+  eq('G35 二次替换仍是恰好一对标记（原地替换，不追加第二份）',
+    [markerLines(twice, SETTINGS_BLOCK_BEGIN), markerLines(twice, SETTINGS_BLOCK_END)], [1, 1])
+  eq('G35b 二次替换后读到的是新值', parseSettingsPatch(twice, YAML),
+    { global_prompt: '/c.md', persona_clear: false, includeHarnessIdentity: false })
+  let endOnly = false
+  try { replaceManagedBlock(SETTINGS_BLOCK_END + '\n', block) } catch (e) { endOnly = true }
+  ok('G36 只有结束标记 → 拒写', endOnly)
+
+  // G37-G40：拿**真实的 cordis.patch.yml** 做端到端——这份文件的注释里就带着标记字面量，
+  // 正是上面那个 bug 的现场。这是本次修复最关键的守护：真文件必须能写进去。
+  {
+    const realPatch = readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8')
+    const realRead = attempt(() => parseSettingsPatch(realPatch, YAML))
+    eq('G37 真实 patch 未被误判成有块', [realRead.error === undefined, realRead.value], [true, null])
+    const realBlock = generateSettingsBlock({ global_prompt: '/mnt/x.md', persona_clear: false, includeHarnessIdentity: true }, YAML)
+    const realRun = attempt(() => replaceManagedBlock(realPatch, realBlock))
+    ok('G38 真实 patch 能追加受管块（本次 bug 的直接回归）', realRun.error === undefined, String(realRun.error))
+    const realNext = realRun.value || ''
+    eq('G39 真实 patch 追加后可回读', parseSettingsPatch(realNext, YAML),
+      { global_prompt: '/mnt/x.md', persona_clear: false, includeHarnessIdentity: true })
+    ok('G40 真实 patch 受管块之前的正文逐字节保留',
+      realNext.indexOf(realPatch.trimEnd()) === 0,
+      JSON.stringify(realNext.slice(0, 40)) + ' / ' + JSON.stringify(realPatch.slice(0, 40)))
+  }
+}
+
+/* ---------------- H. Client 半区：槽注册契约（UI 无法在离线环境点开，至少守住注册面） ----------------
+ * settingsClientCore 必须往 `settings.section`（DSH 设置面板的列表槽）注册，
+ * 且 options 形如 { name, id, order, label:()=>文案 }（label 是函数：locale 变化时重注册）。
+ * 组件函数本身也过一遍，保证无数据时不抛错（真实数据与交互在浏览器里验）。
+ */
+{
+  const ReactMock = {
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+    useEffect: () => {},
+    useRef: (v) => ({ current: v }),
+    useCallback: (fn) => fn,
+  }
+  const makeSlots = () => ({
+    injected: [], registered: [],
+    inject(name, fn) { this.injected.push({ name, fn }) },
+    register(options, render) { this.registered.push({ options, render }); return () => {} },
+  })
+
+  const slots = makeSlots()
+  const css = []
+  settingsClientCore({ get: (n) => (n === 'slots' ? slots : undefined) }, {
+    settingsSlotId: 'probe-settings', rpcPrefix: 'probe', cssPrefix: 'probe-css',
+  }, { React: ReactMock, call: async () => ({}), insertCss: (c) => css.push(c) })
+
+  eq('H1 注入 settings.section 槽', slots.injected.map((i) => i.name), ['settings.section'])
+  slots.injected[0].fn()
+  const reg = slots.registered[0]
+  eq('H2 注册名与槽一致', reg.options.name, 'settings.section')
+  eq('H3 槽注册 id 走双模式隔离参数', reg.options.id, 'probe-settings')
+  eq('H4 面板标题是函数（locale 变化时重注册）', typeof reg.options.label, 'function')
+  eq('H5 标题文案', reg.options.label(), '提示词档案')
+  ok('H6 注入了设置面板样式（类名带隔离前缀）', css.length === 1 && css[0].indexOf('.probe-css') === 0, String(css.length) + ' ' + String(css[0]).slice(0, 24))
+
+  const el = reg.render({ close: () => {} })
+  eq('H7 渲染函数返回组件元素（引用稳定，不新建组件类型）', el.type, reg.render({}).type)
+  let tree = null
+  let crashed = null
+  try { tree = el.type({}) } catch (e) { crashed = String(e && e.message) }
+  ok('H8 无数据时组件不抛错（渲染 loading 态）', crashed === null, String(crashed))
+  ok('H9 loading 态含标题', JSON.stringify(tree).indexOf('提示词档案') !== -1)
+
+  // H11-H13：ready 态下三个控件的取值与**文案方向**必须一致。
+  // 历史教训：includeHarnessIdentity 的标题曾写成「关闭…」而勾选态是 `值 === true`（true = 保留），
+  // 于是默认（false = 已关闭）显示成「未勾选的『关闭』」= 看起来没生效。文案必须与取值同向。
+  {
+    const seedValues = { global_prompt: '', persona_clear: true, includeHarnessIdentity: false }
+    let seq = 0
+    const ReactReady = Object.assign({}, ReactMock, {
+      // 组件内 useState 的顺序是 phase / saved / draft / meta / error
+      useState: (init) => {
+        const i = seq++
+        if (i === 0) return ['ready', () => {}]
+        if (i === 1 || i === 2) return [seedValues, () => {}]
+        if (i === 3) return [{ patchPath: '/pkg/cordis.patch.yml', writable: true }, () => {}]
+        return [typeof init === 'function' ? init() : init, () => {}]
+      },
+    })
+    const slots3 = makeSlots()
+    settingsClientCore({ get: (n) => (n === 'slots' ? slots3 : undefined) }, {
+      settingsSlotId: 'probe-settings-2', rpcPrefix: 'probe', cssPrefix: 'probe-css',
+    }, { React: ReactReady, call: async () => ({}), insertCss: () => {} })
+    slots3.injected[0].fn()
+    const readyTree = slots3.registered[0].render({}).type({})
+
+    // 收集每个字段容器（class 含 `-field`）的文本与其中的 input
+    const fields = []
+    const walk = (node) => {
+      if (node === null || node === undefined || typeof node !== 'object') return
+      if (Array.isArray(node)) { for (const c of node) walk(c); return }
+      const cls = node.props && typeof node.props.className === 'string' ? node.props.className : ''
+      if (cls.indexOf('-field') !== -1) {
+        const bucket = { text: [], inputs: [] }
+        const inner = (n) => {
+          if (n === null || n === undefined || typeof n !== 'object') { if (typeof n === 'string') bucket.text.push(n); return }
+          if (Array.isArray(n)) { for (const c of n) inner(c); return }
+          if (n.type === 'input') { bucket.inputs.push(n.props || {}); return }
+          if (typeof n.children === 'string') bucket.text.push(n.children)
+          for (const c of (n.children || [])) inner(c)
+        }
+        inner(node)
+        fields.push(bucket)
+        return
+      }
+      for (const c of (node.children || [])) walk(c)
+    }
+    walk(readyTree)
+    const textOf = (f) => f.text.join(' ')
+    const boxOf = (f) => f.inputs.find((p) => p.type === 'checkbox') || {}
+    const textboxOf = (f) => f.inputs.find((p) => p.type === 'text') || {}
+
+    eq('H11 设置页渲染出三个字段容器（identity/persona/路径）', fields.length, 3)
+    ok('H12 includeHarnessIdentity：文案说「保留」时默认（false）必须是未勾选',
+      textOf(fields[0]).indexOf('保留 DSH 第一方开场白') !== -1 && boxOf(fields[0]).checked === false,
+      JSON.stringify({ text: textOf(fields[0]).slice(0, 30), checked: boxOf(fields[0]).checked }))
+    ok('H13 persona_clear：文案说「清空」时默认（true）必须是已勾选',
+      textOf(fields[1]).indexOf('清空 persona 段') !== -1 && boxOf(fields[1]).checked === true,
+      JSON.stringify({ text: textOf(fields[1]).slice(0, 20), checked: boxOf(fields[1]).checked }))
+    eq('H14 global_prompt 是文本框且空值渲染为空串（排在最后）', [textboxOf(fields[2]).type, textboxOf(fields[2]).value], ['text', ''])
+    ok('H15 面板会显示落盘路径（save 成功后用户能看到写到哪）',
+      JSON.stringify(readyTree).indexOf('/pkg/cordis.patch.yml') !== -1)
+  }
+
+  // 下拉框核心：确认新增设置页没有影响既有注册面
+  const slots2 = makeSlots()
+  clientCore({ get: (n) => (n === 'slots' ? slots2 : undefined) }, {
+    slotName: 'conversation.input.right', slotId: 'probe-static', rpcPrefix: 'probe', cssPrefix: 'probe-css',
+  }, { React: ReactMock, call: async () => ({}), insertCss: () => {} })
+  eq('H10 下拉框仍注册在原槽位（回归）', slots2.injected.map((i) => i.name), ['conversation.input.right'])
 }
 
 /* ---------------- 汇总 ---------------- */

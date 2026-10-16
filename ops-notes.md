@@ -26,6 +26,10 @@
   进程内存 → **必须重启 `dsh web`**；动态需重新 `cordis_run mode:'update'`。
 - **Client 半区**（`lib/client.js`）：`/plugins/*/client.js` 是**按需读取**（serveBundle 每次请求读文件）
   → 换文件后**刷新页面**即生效，无需重启。
+- **设置面板的值**（DSH 设置 → 提示词档案）分两条路：**内存改动立即生效**（不用重启，连新建会话都不用）；
+  **落盘只为下次启动**——写的是本插件 bundle patch 的受管块，而 DSH 的 HMR 只监视 profile 层与 home 层的
+  patch，**不监视 bundle patch**。所以「改了没保存」和「保存了但没重启」是两种不同的现象，别混。
+- ⚠️ 重装（`dsh plugin add`）会整包覆盖那份 `cordis.patch.yml`，**受管块随之丢失**（见 `deployment.md`）。
 
 ## `/rpc` 是共享通道，只能注册一次
 
@@ -40,25 +44,68 @@
 升级后依次做：
 
 1. `node build.mjs` 能构建（`exports` / `dsh.bundle.patch` / `dsh.client` 元数据语义未被上游改动）；
-2. `node scripts/verify-offline.mjs` 全绿（回归脚本不依赖 DSH 运行时）；
-3. 按 `deployment.md` 的验证步骤走一遍：下拉框出现、RPC 通道可达、新会话 system prompt 内容正确；
-4. 动态插件随重启丢失属预期，按 `deployment.md` 重新 define 即恢复。
+2. `node scripts/verify-offline.mjs` 全绿 + `node scripts/verify-dsh.mjs` 全绿
+   （后者需要 DSH：`DSH_INSTALL_DIR=<dsh 包目录>`；它验的是「库改过的文件 DSH 能否读对」）；
+3. 按 `deployment.md` 的验证步骤走一遍：下拉框出现、**设置页出现且能保存**、RPC 通道可达、
+   新会话 system prompt 内容正确；
+4. **重跑一次受管块的端到端核查**（我们依赖 DSH 的两条 patch 语义与 YAML 方言，
+   见 `internals.md` 的《三层设置与设置面板》）：
+
+   ```bash
+   # 用 DSH 自己的加载器与合并算法验证「同一份 patch 内先 insert、后同 id 顶层覆盖」仍成立，
+   # 并抽查极端标量（反斜杠 / 字面量 true / 换行 / 双引号 / 中文与空格路径）能否逐字符保真。
+   node --input-type=module -e "
+   import { readFileSync, writeFileSync } from 'node:fs'
+   const A='<DSH 安装目录>/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'
+   const m = await import(A)
+   const raw = readFileSync('<仓库>/cordis.patch.yml','utf8')
+   const vals = ['F:\\\\a\\\\b', 'true', '123', '# c', 'a: b', 'say \"hi\"', 'line1\nline2', '中文 路径']
+   for (const v of vals) {
+     const p='/tmp/probe-patch.yml'
+     writeFileSync(p, raw.replace(/\n*\$/,'') + '\n\n# >>> dsh-profile-selector:settings:begin\n- id: dsh-profile-selector\n  config:\n    global_prompt: ' + JSON.stringify(v) + '\n    persona_clear: false\n    includeHarnessIdentity: true\n# <<< dsh-profile-selector:settings:end\n')
+     const rows = m.loadOverlayPatches('dsh', p)
+     const e = m.composeEntries([rows], (msg,...a)=>console.error('WARN', msg, ...a)).find((x)=>x.id==='dsh-profile-selector')
+     const got = e?.config?.global_prompt
+     console.log((got===v?'ok  ':'FAIL') + ' ' + JSON.stringify(v) + ' -> ' + JSON.stringify(got))
+     if (e?.config?.includeHarnessIdentity !== true || e?.config?.persona_clear !== false) console.log('FAIL config 键未生效')
+     if (!e?.inject || !e?.name) console.log('FAIL insert 行的 name/inject 丢失')
+   }"
+   ```
+
+   期望：每个值都 `ok`，且 `name` / `inject` / 三个 config 键齐全（2026-10-16 实测全绿；
+   `writeFileSync` 的路径若不存在请先建目录）。**这条现在由 `scripts/verify-dsh.mjs` 自动跑**，
+   改 `core/patch.js` 之前先复现这个问题。
+
+5. 动态插件随重启丢失属预期，按 `deployment.md` 重新 define 即恢复。
 
 | DSH 版本 | 核查结论 |
 |---|---|
 | 0.1.2-alpha.2 | 兼容：插件零代码改动，动态重新部署即恢复 |
 | 0.1.5-alpha.1 | ⚠️ `connection.rpc.handle` 全员失效 → 已改用 `connection.register(ctx, ...)`（见 `CHANGELOG.md` 的 pkg-24） |
+| 0.2.1-alpha.4 | 兼容（本机现役）。新增能力经核查可用：`settings.section` 槽（契约 `dsh-client-ui-settings/lib/types/client/contract/slots.d.ts`）、`agents.list()`、`Entry.options.config`（`apply(ctx, config)` 的第二参数）；patch 语义确认「同一份 patch 内先 insert、后同 id 顶层覆盖」成立且对 `config` 是整块替换（**已用 `loadOverlayPatches` + `composeEntries` 端到端实测**，见上面第 4 步）；HMR 只监视 profile/home patch，**不监视 bundle patch**（这决定了设置面板的落盘策略，见 `internals.md`） |
 
-## 排查顺序（下拉框不显示 / 提示词没生效时）
+## 排查顺序（下拉框不显示 / 设置页缺失 / 提示词没生效时）
 
 1. **先看模式**：Minimal 模式的 persona 行带 `complete: true`，会让 persona 段改写**静默失效**
    （Standard / cordis / ptc 均可）。本项目不使用 Minimal——所以「某个会话没生效」的第一反应是看模式，
    而不是翻代码。
-2. **分清半区**：下拉框不显示 = **Client 半区**（先刷新页面；再查
+2. **分清半区**：下拉框不显示 / **设置页不出现** = **Client 半区**（先刷新页面；再查
    `curl -s http://127.0.0.1:3080/ | grep dsh-profile-selector` 是否在 boot 图里）；注入没生效 = **Host 半区**
    （看 Host 日志里有没有 `[dsh-profile-selector]` 的 warn）。
 3. **确认 profile 里是新代码**：`md5sum lib/index.js` 与 profile 拷贝对比（见 `deployment.md`）；
    静态还得确认重启过 web。
 4. **确认工作区配置**：`.deepseek.yaml` 在**会话 cwd**（不是部署根目录）下、档案 `file` / `global_prompt` /
    `persona_prompt` 指向的文件真实存在（若配了；**不配则默认清空**）、`persona_clear` 为布尔或未配置。
-5. **仍不对**：让会话自述 system prompt，对照 `features.md` 的注入内容说明逐项核对。
+5. **设置面板问题**：设置页在但保存没反应 → 看面板底部那行「写入位置」：
+   - 显示路径 → 去该文件确认末尾有没有受管块（一对 `# >>>` / `# <<<` 整行标记夹住的
+     `- id: dsh-profile-selector` 条目）；没有说明写盘失败（Host 日志里会有 warn）；
+   - 提示「只在本次运行生效」→ 当前是**动态模式**（没有可写的包目录），属预期，不是 bug；
+   - 保存后当前会话没变 → 该会话的 agent 是否还活着？`refreshSessions()` 只重算 `agents.list()` 里的活跃会话，
+     其余会话下次 `agent/created` 时用新值。
+6. **写盘报「受管块标记不完整」**（pkg-31 已修；再遇到说明代码被改回去了）：
+   `core/patch.js` 必须按**整行**识别标记（`line.trim() === 标记`），**不能**用 `indexOf` 子串查找——
+   曾因 `cordis.patch.yml` 的注释里引用了完整标记字面量而被误命中（只有 begin 没有配对 end），
+   导致每次保存都失败、配置永远落不了盘。数整行标记：
+   `awk '{gsub(/^[ \t]+|[ \t]+$/,""); if ($0=="# >>> dsh-profile-selector:settings:begin") n++} END{print n+0}' <patch 文件>`
+   （应 ≤ 1；`grep -c` 会把注释里的简写也算进去，不能作为判据）。
+7. **仍不对**：让会话自述 system prompt，对照 `features.md` 的注入内容说明逐项核对。

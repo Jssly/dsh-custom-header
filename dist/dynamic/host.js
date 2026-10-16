@@ -1,93 +1,342 @@
 /**
  * dsh-profile-selector — 动态模式 Host 壳（开发用）
  *
- * 本文件是 cordis_define 的函数体模板：build.mjs 会把 src/core/yaml.js 与
- * src/core/host.js 的源码（去掉 export 关键字）内联到 /*__CORE_YAML__*\/ 与
- * /*__CORE_HOST__*\/ 占位符处，生成 dist/dynamic/host.js 供 cordis_define 使用。
- * 请勿直接编辑 dist/dynamic/*.js（构建产物）。
+ * 本文件是 cordis_define 的函数体模板：build.mjs 会把 src/core/ 下的共享核心源码
+ * （去掉 export / import 关键字）内联到对应占位符处，生成 dist/dynamic/host.js 供
+ * cordis_define 使用。请勿直接编辑 dist/dynamic/*.js（构建产物）。
+ *
+ * ⚠️ 动态函数体没有模块系统（宿主用 `new Function(wrapped)` 求值），所以：
+ *   · YAML 能力用**动态 import** 取 `yaml` 库（apply 因此是 async）；取不到时传 null，
+ *     核心会在真正需要解析时明确报错——该模式本就不支持落盘，受影响的是工作区配置解析。
+ *   · 动态模式没有「插件包目录下的 cordis.patch.yml」可写，故 patchPath 传 null：
+ *     设置面板的改动只在本次运行生效（面板会提示「重启后回退」）。要持久化请用静态模式。
  */
 /**
- * dsh-profile-selector — 共享核心：迷你 YAML 解析器（纯函数，零依赖）
+ * dsh-profile-selector — 共享核心：提示词设置的三层配置模型（纯函数，零依赖）
  *
  * 双模式共用：动态模式由 build.mjs 内联进 cordis_define 函数体；
  * 静态模式由 src/static/*.js 以 ESM import 引用。
- * 仅支持 .deepseek.yaml 所需子集：map / 标量 / 标量列表（block sequence）。
- * 不支持锚点、多行字符串（|、>）、嵌套列表、列表内 map 等复杂结构。
+ *
+ * ## 三层合并
+ *
+ * 优先级从低到高，**高者按字段覆盖低者**（未设置的字段沿用低层，即「值覆盖」，
+ * 不是「整份替换」）：
+ *
+ *   1. 内置默认  DEFAULT_SETTINGS（代码常量）
+ *   2. 插件配置  cordis.patch.yml → `- id: dsh-profile-selector → config`
+ *                （同时也是设置面板**写入**的那一层）
+ *   3. 工作区覆盖 会话 cwd 的 .deepseek.yaml → `workspace` 段
+ *
+ * 举例：插件配置 `global_prompt: /opt/global.md`、工作区只写了
+ * `persona_clear: false` —— 结果是「开场白仍用 /opt/global.md」+「persona 段保留原句」，
+ * 工作区没提的 `includeHarnessIdentity` 继续沿用插件配置的值。
+ *
+ * ## 字段
+ *
+ * 键名与 .deepseek.yaml / patch config 保持一致（不做大小写转换，用户在哪一层
+ * 看到的都是同一个名字）。值类型不符或键缺失一律记为 `undefined` = 「本层未设置」。
+ *
+ * | 键 | 类型 | 语义 |
+ * |---|---|---|
+ * | `global_prompt` | string | 开场白覆盖文件路径；**空串 = 本层不覆盖**。插件层是绝对路径（插件全局设置），工作区层是相对会话 cwd 的路径（与档案 `file` 规则一致） |
+ * | `persona_clear` | boolean | `true` = 清空 preset 自带的 `You are a coding agent powered by the {{model}} model.`；`false` = 保留原句 |
+ * | `includeHarnessIdentity` | boolean | `false` = 关闭 DSH 第一方开场白 `You are an AI agent powered by DeepSeek Harness.`；`true` = 保留 |
+ *
+ * `global_prompt` 优先级高于 `includeHarnessIdentity`：配了开场白覆盖文件就按文件来，
+ * 该开关只在没有可用覆盖文件时决定那句英文的去留（见 host.js 的 resolveIdentity）。
  */
 
-/** 解析单个标量：去引号、布尔、数字、null。 */
-function parseScalar(raw) {
-  const v = String(raw).trim()
-  if (v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) return v.slice(1, -1)
-  if (v === 'true') return true
-  if (v === 'false') return false
-  if (v === 'null' || v === '~') return null
-  if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v)
-  return v
+/** 设置键的固定顺序（UI、patch 受管块、诊断输出都按它排列）。 */
+const SETTINGS_KEYS = ['global_prompt', 'persona_clear', 'includeHarnessIdentity']
+
+/** 每个键的期望类型：归一化时据此校验（类型不符 = 本层未设置）。 */
+const KEY_TYPES = {
+  global_prompt: 'string',
+  persona_clear: 'boolean',
+  includeHarnessIdentity: 'boolean',
 }
 
 /**
- * 解析 YAML 文本为嵌套对象（map + 标量 + 标量列表子集）。
- *
- * 支持的形态：
- *   key: value                  → 标量（字符串去引号 / 布尔 / 数字 / null）
- *   key:                        → 嵌套 map（缩进栈）
- *   key:\n  - item              → 标量列表（block sequence；缩进对齐 key 的写法同样支持）
- * 空行与 `#` 注释行忽略；无法识别的行按「忽略」处理（不抛错，与库内既有风格一致）。
- *
- * 实现要点：`key:` 空值先懒创建一个占位对象并压栈（pending=true），若该层的首个内容行是
- * 列表项 `- item`，就把父容器里的这个占位对象**原地替换成数组**（YAML 的 map/list 二义性靠此消除）；
- * 一旦该层写入了子键或列表项，pending 即置 false。
+ * 内置默认值 —— 与「本插件引入设置项之前」的既有行为逐项等价：
+ * 不清空 = 不覆盖开场白（`global_prompt: ''`）、persona 段清空（`true`）、
+ * DSH 第一方开场白关闭（`false`）。
  */
-function parseYaml(text) {
-  const root = {}
-  /** 缩进栈：{ indent, obj, parent, key, pending }（obj 为对象或数组；parent/key 记录挂载位置）。 */
-  const stack = [{ indent: -1, obj: root, parent: null, key: null, pending: false }]
-  const lines = String(text).split(/\r?\n/)
-  for (const raw of lines) {
-    const line = raw.replace(/\s+$/, '')
-    if (!line.trim() || line.trim().startsWith('#')) continue
-    const indent = line.match(/^\s*/)[0].length
-    const content = line.slice(indent)
-    const isItem = content === '-' || /^-\s/.test(content)
-    while (stack.length > 1) {
-      const top = stack[stack.length - 1]
-      // 列表项与所属 key 同缩进（key: 换行后直接 "- item"）时保留占位层 / 数组层
-      if (indent === top.indent && isItem && (top.pending || Array.isArray(top.obj))) break
-      if (indent <= top.indent) { stack.pop(); continue }
-      break
-    }
-    const top = stack[stack.length - 1]
+const DEFAULT_SETTINGS = Object.freeze({
+  global_prompt: '',
+  persona_clear: true,
+  includeHarnessIdentity: false,
+})
 
-    // 列表项：仅支持标量项；父层未定（空值占位）时就地升级为数组
-    if (isItem) {
-      const item = parseScalar(content.replace(/^-\s*/, ''))
-      if (Array.isArray(top.obj)) { top.obj.push(item); continue }
-      if (!top.pending || !top.parent) continue
-      const arr = []
-      top.parent[top.key] = arr
-      top.obj = arr
-      top.pending = false
-      arr.push(item)
-      continue
-    }
-
-    if (Array.isArray(top.obj)) continue // 列表内不支持 map 项
-    const m = content.match(/^([^:#]+?):\s*(.*)$/)
-    if (!m) continue
-    const key = m[1].trim()
-    const value = m[2].trim()
-    if (value === '') {
-      const child = {}
-      top.obj[key] = child
-      top.pending = false
-      stack.push({ indent, obj: child, parent: top.obj, key, pending: true })
-    } else {
-      top.obj[key] = parseScalar(value)
-      top.pending = false
+/**
+ * 把任意来源的原始对象归一化为一层设置。
+ *
+ * 只认 `SETTINGS_KEYS` 里的键，且只认类型正确的值——类型不符/键缺失都不写入结果
+ * （= 本层未设置），这样调用方无需区分「键不存在」与「值非法」，两者对合并的语义完全相同。
+ *
+ * @param raw - 原始对象（patch config / .deepseek.yaml 的 workspace 段 / RPC 入参）。
+ * @returns 只含本层**显式设置**的字段的对象（可能为空对象）。
+ */
+function normalizeLayer(raw) {
+  const out = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const key of SETTINGS_KEYS) {
+    if (KEY_TYPES[key] === 'string') {
+      if (typeof raw[key] === 'string') out[key] = raw[key].trim()
+    } else if (typeof raw[key] === 'boolean') {
+      out[key] = raw[key]
     }
   }
-  return root
+  return out
+}
+
+/**
+ * 按参数顺序逐层合并（后面的层覆盖前面的层，按字段）。
+ * @param layers - 任意个层对象；`null` / `undefined` 层被忽略。
+ * @returns 合并结果（只含至少被某一层设置过的字段）。
+ */
+function mergeLayers(...layers) {
+  const out = {}
+  for (const layer of layers) {
+    if (!layer) continue
+    for (const key of SETTINGS_KEYS) {
+      if (layer[key] !== undefined) out[key] = layer[key]
+    }
+  }
+  return out
+}
+
+/**
+ * 求最终生效值：内置默认 ← 插件配置 ← 工作区覆盖。
+ * @param pluginLayer - 归一化后的插件层（见 normalizeLayer）。
+ * @param workspaceLayer - 归一化后的工作区层；缺省视为空层。
+ * @returns 三个键都齐备的生效设置。
+ */
+function resolveSettings(pluginLayer, workspaceLayer) {
+  return mergeLayers(DEFAULT_SETTINGS, pluginLayer, workspaceLayer)
+}
+
+/**
+ * 报告每个字段的生效来源，供 UI / 诊断解释「这个值是谁给的」。
+ * @returns `{ <key>: 'workspace' | 'plugin' | 'default' }`
+ */
+function settingsSources(pluginLayer, workspaceLayer) {
+  const out = {}
+  for (const key of SETTINGS_KEYS) {
+    if (workspaceLayer && workspaceLayer[key] !== undefined) out[key] = 'workspace'
+    else if (pluginLayer && pluginLayer[key] !== undefined) out[key] = 'plugin'
+    else out[key] = 'default'
+  }
+  return out
+}
+/**
+ * dsh-profile-selector — 共享核心：bundle patch 的受管块读写
+ *
+ * ## 职责分工（关键）
+ *
+ * | 事情 | 谁做 |
+ * |---|---|
+ * | YAML 的**生成**与**解析** | **`yaml` 库**（成熟实现：自动决定何时加引号、多行用块标量、转义交给它） |
+ * | 受管块的**范围界定** | 本文件 —— 库不管「哪几行是自己的」 |
+ * | 整份文件的**替换** | 本文件 —— 按行拼接，标记之外的每一行原样保留（别人的内容绝不重写） |
+ *
+ * 为什么不让库去解析/重写**整份**文件：patch 文件里有别人的 `- insert:` 定义、注释，
+ * 也可能有 `!!js` 表达式（DSH 的 loader 方言）。用库 `parseDocument` → `toString()` 往返
+ * 会重排格式、按 `lineWidth` 折行（实测 `yaml` 2.9.1 对真实 patch 往返有数百行差异）。
+ * 所以：**库只管块内那一小块，块之外靠文本标记界定。**
+ *
+ * ## 受管块
+ *
+ * 块本身是一个**顶层 patch 条目**，按 id 命中 `- insert:` 里定义的那一行做 config 覆盖：
+ *
+ *   # >>> dsh-profile-selector:settings:begin
+ *   - id: dsh-profile-selector
+ *     config:
+ *       global_prompt: ''
+ *       persona_clear: true
+ *       includeHarnessIdentity: false
+ *   # <<< dsh-profile-selector:settings:end
+ *
+ * 两条 DSH 语义（`applyEntryPatches`）：① 同一份 patch 内「先 insert、后同 id 顶层覆盖」
+ * 成立，所以块追加在文件末尾即可；② 顶层覆盖对 `config` 是**整块替换**，所以块内必须
+ * 写全三个键。
+ *
+ * ## 标记识别：整行精确匹配
+ *
+ * 只认「去掉首尾空白后整行恰好等于标记」的行。**不要**改成 `indexOf` 子串查找 ——
+ * 曾因此把说明性注释里引用的标记字面量当成块边界，导致保存永远失败。
+ *
+ * 本模块的 YAML 能力由**壳**注入（`yaml` 参数 = `{ parse, stringify }`）：静态模式由
+ * `src/static/host.js` 传入 `import * as YAML from 'yaml'`；动态模式在 apply 里
+ * `await import('yaml')`（该模式本就不支持落盘，拿不到库时只影响工作区配置解析）。
+ */
+
+/** 受管块起始标记（整行，`#` 注释形态）。 */
+const SETTINGS_BLOCK_BEGIN = '# >>> dsh-profile-selector:settings:begin'
+/** 受管块结束标记。 */
+const SETTINGS_BLOCK_END = '# <<< dsh-profile-selector:settings:end'
+/** 受管条目命中的 loader entry id（与 package.json name / patch insert id 一致）。 */
+const MANAGED_ROW_ID = 'dsh-profile-selector'
+
+/** 块内暴露的三个设置键（数据序；展示序见 core/settings-client.js）。 */
+const KEYS = SETTINGS_KEYS
+
+/** 某行是否为标记行：整行精确匹配（见文件头的「标记识别」）。 */
+function isMarkerLine(line, marker) {
+  return typeof line === 'string' && line.trim() === marker
+}
+
+/**
+ * 定位受管块的 begin / end 行号（0 基）。只认第一对。
+ * 只有其一、或 end 在 begin 之前 → 抛错（文件被改坏，宁可拒写也不猜）。
+ * @returns `{ begin, end }`；无标记时为 `{ begin: -1, end: -1 }`。
+ */
+function locateBlock(lines) {
+  let begin = -1
+  let end = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (begin < 0) {
+      if (isMarkerLine(lines[i], SETTINGS_BLOCK_BEGIN)) begin = i
+      continue
+    }
+    if (isMarkerLine(lines[i], SETTINGS_BLOCK_END)) { end = i; break }
+  }
+  if (begin < 0) {
+    if (lines.some((line) => isMarkerLine(line, SETTINGS_BLOCK_END))) {
+      throw new Error('cordis.patch.yml 中 dsh-profile-selector 受管块标记不完整（只找到结束标记）')
+    }
+    return { begin: -1, end: -1 }
+  }
+  if (end < 0) throw new Error('cordis.patch.yml 中 dsh-profile-selector 受管块标记不完整（只找到起始标记）')
+  return { begin, end }
+}
+
+/**
+ * 把任意输入收敛为「要写进块的三个值」：只留三个键，且类型正确
+ * （`global_prompt` 非字符串→空串；布尔非 `true`→`false`）。纯 JS 对象处理，与 YAML 语法无关。
+ */
+function canonicalSettings(values) {
+  const v = values && typeof values === 'object' ? values : {}
+  const out = {}
+  for (const key of KEYS) {
+    out[key] = key === 'global_prompt'
+      ? (typeof v[key] === 'string' ? v[key] : '')
+      : v[key] === true
+  }
+  return out
+}
+
+/** 断言 yaml 能力已注入（壳没给就说明部署不完整，明确报错好过静默出错）。 */
+function requireYaml(yaml) {
+  if (!yaml || typeof yaml.parse !== 'function' || typeof yaml.stringify !== 'function') {
+    throw new Error('yaml 能力未注入（静态壳应传 import * as YAML from \'yaml\' 的结果）')
+  }
+  return yaml
+}
+
+/**
+ * 生成完整受管块文本（含首尾标记与结尾换行）。YAML 正文交给 `yaml.stringify`：
+ * 引号、转义、多行块标量由库决定（`lineWidth: 0` 禁止折行，保持一行一个值）。
+ */
+function generateSettingsBlock(values, yaml) {
+  const lib = requireYaml(yaml)
+  const body = lib.stringify([{ id: MANAGED_ROW_ID, config: canonicalSettings(values) }], { indent: 2, lineWidth: 0 })
+  return SETTINGS_BLOCK_BEGIN + '\n' + String(body).replace(/\n+$/, '') + '\n' + SETTINGS_BLOCK_END + '\n'
+}
+
+/**
+ * 提取受管块正文（不含 begin/end 两行本身）。
+ * @returns 块正文；无受管块返回 null；标记不完整时抛错。
+ */
+function extractSettingsBlock(raw) {
+  const lines = String(raw).split('\n')
+  const { begin, end } = locateBlock(lines)
+  if (begin < 0) return null
+  return lines.slice(begin + 1, end).join('\n')
+}
+
+/**
+ * 读回受管块里的设置（YAML 解析交给 `yaml.parse`）。
+ * @returns 三个键的对象；**没有受管块**（= 从未写过）返回 null；块被改坏/解析不出也返回 null。
+ */
+function parseSettingsPatch(raw, yaml) {
+  const lib = requireYaml(yaml)
+  const block = extractSettingsBlock(raw)
+  if (block === null || block.trim() === '') return null
+  let parsed
+  try {
+    parsed = lib.parse(block)
+  } catch (e) {
+    return null
+  }
+  const row = Array.isArray(parsed) ? parsed.find((r) => r && r.id === MANAGED_ROW_ID) : null
+  const config = row && typeof row.config === 'object' && row.config !== null ? row.config : null
+  if (config === null) return null
+  // 只取三个键（块里若被人加了别的键，不往上层传）
+  const out = {}
+  let seen = 0
+  for (const key of KEYS) {
+    if (config[key] !== undefined) { out[key] = config[key]; seen++ }
+  }
+  return seen === 0 ? null : out
+}
+
+/**
+ * 用新的受管块替换旧块；标记之外的所有行**原样保留**。
+ *   · 已有成对标记 → 替换 begin..end 区间；
+ *   · 无标记 → 追加到末尾（空模板 `[]` 先被替换掉，避免拼出非法的 `[] - insert`）；
+ *   · 删除块后只剩注释/空行 → 补回流式空数组 `[]`。
+ */
+function replaceManagedBlock(raw, block) {
+  const text = String(raw)
+  const body = typeof block === 'string' ? block : ''
+  const lines = text.split('\n')
+  const { begin, end } = locateBlock(lines)
+  const blockLines = body === '' ? [] : body.replace(/\n$/, '').split('\n')
+
+  if (begin >= 0) {
+    const next = [...lines.slice(0, begin), ...blockLines, ...lines.slice(end + 1)].join('\n')
+    if (blockLines.length > 0) return next
+    const meaningful = next.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('#'))
+    if (meaningful.length === 0) return next.replace(/\s*$/, '') + '\n[]\n'
+    return next
+  }
+
+  if (blockLines.length === 0) return text
+  const meaningful = lines.map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('#'))
+  if (meaningful.length === 1 && meaningful[0] === '[]') {
+    const index = lines.findIndex((l) => l.trim() === '[]')
+    return [...lines.slice(0, index), ...blockLines, ...lines.slice(index + 1)].join('\n')
+  }
+  const prefix = text.length === 0 ? '' : text.endsWith('\n') ? '\n' : '\n\n'
+  return text + prefix + body
+}
+
+/** 受管块**之外**的行（去尾空行），用于下面那条断言。 */
+function externalLines(text) {
+  const lines = String(text).split('\n')
+  const { begin, end } = locateBlock(lines)
+  const ext = begin < 0 ? lines : [...lines.slice(0, begin), ...lines.slice(end + 1)]
+  while (ext.length > 0 && ext[ext.length - 1].trim() === '') ext.pop()
+  return ext
+}
+
+/**
+ * 落盘的唯一入口：生成受管块 → 写进文件文本。
+ *
+ * 只保留**一条**断言：受管块之外的行必须逐行不变（防止替换逻辑误伤别人的配置）。
+ * 块内容的正确性由 `yaml` 库负责（生成/解析同一套实现，往返可靠），不再另写自校验。
+ *
+ * @returns 写入后的完整文本（调用方可直接落盘）。
+ * @throws 标记不完整、或块外内容被改动时抛错（此时**不写盘**）。
+ */
+function applySettingsToPatch(raw, values, yaml) {
+  const lib = requireYaml(yaml)
+  const text = String(raw)
+  const next = replaceManagedBlock(text, generateSettingsBlock(values, lib))
+  if (JSON.stringify(externalLines(text)) !== JSON.stringify(externalLines(next))) {
+    throw new Error('写入中止：受管块之外的内容将被改动（原文件未动）')
+  }
+  return next
 }
 /**
  * dsh-profile-selector — 共享核心：Host 半区逻辑（工厂函数，零依赖）
@@ -98,12 +347,24 @@ function parseYaml(text) {
  * 参数化（双模式隔离的关键）：
  *   opts.sectionName — systemPrompt section 名（动态 dsh-profile:profile / 静态 dsh-profile:profile-static）
  *   opts.rpcPrefix   — RPC method 前缀（动态 dshprofile / 静态 dshprofile-static）
- *   rpc.handle       — RPC 注册适配器（动态 harness.handle / 静态 connection.rpc.handle）
+ *   rpc.handle       — RPC 注册适配器（动态 harness.handle / 静态 connection.register 的 method 表）
  *                      handler 签名统一为 (args) => Promise<业务结果>，适配器负责包装
+ *   deps.config      — 插件 config（Loader 传入的 `config:`；见下「三层设置」）
+ *   deps.patchPath   — 设置受管块所在文件（**本插件自己的 bundle patch**，即安装目录下的
+ *                      cordis.patch.yml）；null/缺省 = 只改内存不落盘（动态模式）
+ *   deps.readText / deps.writeText — 受管块的文件读写（由壳注入；核心不直接碰 fs）
  *
- * 用法：hostCore(ctx, opts, rpc) 即 apply 的函数体——动态壳
- * `return { apply(ctx) { hostCore(ctx, opts, rpc) } }`，静态壳
- * `export default { apply(ctx) { hostCore(ctx, opts, rpc) } }`。
+ * 用法：hostCore(ctx, opts, rpc, deps) 即 apply 的函数体——动态壳
+ * `return { apply(ctx) { hostCore(ctx, opts, rpc, deps) } }`，静态壳同理。
+ *
+ * ## 三层设置（值覆盖，见 core/settings.js）
+ *
+ *   内置默认 ← 插件 config（cordis.patch.yml）← 工作区 .deepseek.yaml 的 workspace 段
+ *
+ * 插件层就是 Loader 交给本插件的 `deps.config`：设置面板把新值写进**同一份 patch 文件**的
+ * 受管块（一个按 id 命中本行的顶层覆盖条目），而 DSH 的 patch 对 `config` 是**整块替换**，
+ * 所以下次启动时 `deps.config` 里已经含有面板写入的值——核心不必自己读盘合并。
+ * 运行期面板保存时先更新内存（立即生效），再写盘（持久化）。
  *
  * 关键机制（勿随意改动，详见 internals.md）：
  * 1. 会话级串行队列 enqueue()：同一会话的 activate 严格顺序执行，杜绝注册竞态；
@@ -112,12 +373,11 @@ function parseYaml(text) {
  * 3. sectionDiag()：出错时返回残留注册位置诊断（scopedHits/agentKeyHit/globalHit）；
  * 4. temperature 经 agent/request 瀑布注入（top_p 无对应配置项，不应用）；
  * 5. ctx.on('dispose') 统一清理：disposer + disposeTemp + forceCleanSection 兜底；
- * 6. 工作区开场白覆盖（workspace.global_prompt）：以同名 section 注册进 agent 作用域，
- *    按名 shadow 掉 DSH 第一方开幕式（harness:identity）——只改文本、不动 DSH 源码，
- *    且只影响该工作区的会话（见 IDENTITY_SECTION 注释）；
- *    **未配置（键缺失/非字符串/空值）/ 文件不存在 / 文件为空 → 一律走 unapplyIdentity()
- *    卸载旧注册（disposer + forceCleanSection 兜底），保留 DSH 默认开场白——绝不「配置没了、
- *    覆盖还在」**；成功路径见 applyIdentity()。
+ * 6. 开场白（harness:identity）由**三层设置**求值后决定，见 resolveIdentity()：
+ *    有效 `global_prompt` 有可读正文 → 用它 shadow（只改文本、不动 DSH 源码，且只影响
+ *    本会话）；否则 `includeHarnessIdentity: false` → shadow 成**空串**（那句话消失）；
+ *    否则 → **不注册**，保留 DSH 默认那句。三种落点都先走 unapplyIdentity()
+ *    卸载旧注册（disposer + forceCleanSection 兜底），绝不「配置没了、覆盖还在」。
  * 7. 档案 file 支持 string | string[]：数组按声明顺序逐个读盘，用空行合并为一段正文
  *    （见 normalizeFiles / profileText）；
  * 8. 子代理会话（header.origin === 'subagent'）的档案继承：agent/created 时按父会话
@@ -127,18 +387,25 @@ function parseYaml(text) {
  * 9. 未激活会话**一律排队**（pending）而不是报红字：sessionExists() 仅供日志诊断。
  *    它过去用 snapshot.id 匹配，而 SessionPersistenceSnapshot 的 id 在 header.id 上，
  *    恒 false → 子代理会话被误判为「不存在」，唯一一次自动加载被吞（internals.md）。
- * 10. persona 段覆盖（workspace.persona_prompt / workspace.persona_clear）：以
+ * 10. persona 段覆盖（persona_prompt / persona_clear）：以
  *    `system-prompt/assemble` 监听器（挂在会话 agent 作用域）改写 preset 的
  *    `deployment:persona-prefix` 段——该槽位在 agent 层**已有 owner**（preset 的
  *    `@deepseek-ai/dsh-persona` 行），同层同名 section 重复注册会抛错，所以只能改写装配
  *    结果，不能靠 shadow（与第 6 条的开场白覆盖路径不同）。⚠️ 用最强机制的代价：必须原样
  *    透传 tools/contexts/variables，且**绝不吞 next() 的异常**（internals.md）。
  *    默认行为 = **清空**（连 `.deepseek.yaml` 都没有的工作区也一样）；要保留 preset 原句需显式写
- *    `persona_clear: false`，要换成自己的话用 `persona_prompt`（见 internals.md / features.md）。
+ *    `persona_clear: false`（任一层：插件设置面板或工作区 .deepseek.yaml），
+ *    要换成自己的话用 `persona_prompt`（见 internals.md / features.md）。
+ * 11. 设置面板（settings.section 槽）经 `<prefix>.settings` / `<prefix>.settings.set`
+ *    读写**插件层**设置：保存时先更新内存（当场对所有活跃会话重新求值 = 立即生效），
+ *    再把整份设置写进本插件 bundle patch 的受管块（持久化；见 core/patch.js）。
+ *    受管块是**顶层 id 覆盖条目**，DSH 对 config 整块替换，故必须写全三个键。
  */
 
+
 /** Host 半区 apply 函数体：执行全部注册逻辑。 */
-function hostCore(ctx, opts, rpc) {
+function hostCore(ctx, opts, rpc, deps) {
+  const env = deps || {}
   const fs = ctx.get('fs')
   const sandboxPolicy = ctx.get('sandboxPolicy')
   const agents = ctx.get('agents')
@@ -174,7 +441,7 @@ function hostCore(ctx, opts, rpc) {
   const rpcPrefix = opts.rpcPrefix
   // sessionId -> { profileName, disposer, disposeTemp, temperature, sp, agent }
   const active = new Map()
-  // sessionId -> { disposer, sp, agent, file }：global_prompt 覆盖的当前注册
+  // sessionId -> { disposer, sp, agent, file }：开场白覆盖的当前注册
   const identity = new Map()
   // sessionId -> { disposer, agent }：persona 段装配监听器的当前挂载（见 internals.md）
   const persona = new Map()
@@ -190,6 +457,26 @@ function hostCore(ctx, opts, rpc) {
   // 会话级串行队列：保证同一会话的 activate 顺序执行，杜绝注册竞态
   const chains = new Map()
   const handles = []
+  /**
+   * YAML 能力（`yaml` 库），由**壳**注入：
+   *   · 静态模式：`src/static/host.js` 的 `import * as YAML from 'yaml'`
+   *   · 动态模式：apply 里 `await import('yaml')`（拿不到时为 null → 工作区配置解析降级）
+   * 核心里的 YAML 生成/解析全部走它，核心自身不再有任何手写 YAML 语法处理。
+   */
+  const yamlLib = env.yaml && typeof env.yaml.parse === 'function' && typeof env.yaml.stringify === 'function'
+    ? env.yaml
+    : null
+  // 设置受管块所在文件（安装目录下的 cordis.patch.yml）；null = 只改内存不落盘
+  const patchPath = typeof env.patchPath === 'string' && env.patchPath.length > 0 ? env.patchPath : null
+  /**
+   * 插件层设置（三个键，见 core/settings.js）：默认 ← Loader 传入的 config。
+   * 设置面板保存时就地更新它 → 活跃会话**立即**按新值重新求值，无需重启 DSH；
+   * 落盘只为下次启动（bundle patch 只在 `dsh web` 启动时应用，改文件本身不会热重载）。
+   */
+  let pluginLayer = normalizeLayer(env.config)
+  // 内存更新与落盘的串行队列：避免并发保存把受管块写乱
+  let saveChain = Promise.resolve()
+
 
   /** 统一告警出口：logger 缺失或抛错都不影响主流程。 */
   function warn(message) {
@@ -342,15 +629,36 @@ function hostCore(ctx, opts, rpc) {
   }
 
   /**
+   * 用 `yaml` 库解析工作区配置（唯一入口，避免各处重复处理异常）。
+   * 空文件 → `{}`；库缺失 → 抛错（调用方兜住并降级）；语法错误 → 抛错并带上文件名。
+   */
+  function parseWorkspaceYaml(text, target) {
+    if (yamlLib === null) throw new Error('yaml 库不可用（未注入），无法解析 ' + target)
+    try {
+      return yamlLib.parse(String(text)) ?? {}
+    } catch (err) {
+      throw new Error('YAML 解析失败: ' + target + ' — ' + String((err && err.message) || err))
+    }
+  }
+
+  /**
    * 解析工作区 .deepseek.yaml 的 workspace 段——**唯一读盘入口**：
-   * 档案列表、开场白覆盖与 persona 段覆盖共用一次解析，避免同一会话重复读同一文件。
-   * @returns { profiles, globalPrompt, personaPrompt, personaClear }
-   *   （globalPrompt / personaPrompt 为 null 表示未配置或值无效）
+   * 档案列表、三层设置与 persona 替换源共用一次解析，避免同一会话重复读同一文件。
+   *
+   * YAML 由 `yaml` 库解析（完整 YAML 语义，不再是手写子集）。
+   * ⚠️ 配置有语法错误时**这里会抛错**（旧的手写解析器是"尽力忽略、不报错"）——
+   * 这是有意的：非法配置应当明确失败，而不是被猜成另一份配置。各调用点都各自兜住
+   * （见 effectiveSettings / resolvePromptOverrides / .profiles handler）。
+   *
+   * @returns { profiles, settings, personaPrompt }
+   *   settings = normalizeLayer(workspace 段)：只含工作区**显式设置**的三个键
+   *   （global_prompt / persona_clear / includeHarnessIdentity），供 core/settings.js
+   *   按字段覆盖插件层；personaPrompt 为 null 表示未配置（它是替换源，不属于面板字段）。
    */
   async function loadWorkspace(cwd) {
     const target = await fs.resolve('.deepseek.yaml', { cwd })
     const text = await fs.readText(target)
-    const parsed = parseYaml(text)
+    const parsed = parseWorkspaceYaml(text, target)
     const ws = parsed && parsed.workspace && typeof parsed.workspace === 'object' ? parsed.workspace : {}
     const prompts = ws.system_prompts && typeof ws.system_prompts === 'object' ? ws.system_prompts : null
     const profiles = prompts === null ? [] : Object.keys(prompts)
@@ -371,20 +679,41 @@ function hostCore(ctx, opts, rpc) {
         }
       })
       .filter((p) => p !== null)
-    // 工作区级开场白覆盖：非空字符串才是有效配置（YAML 空值/非字符串一律当未配置）
-    const raw = ws.global_prompt
-    const globalPrompt = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
-    // 工作区级 persona 段覆盖（见 internals.md / features.md）：
-    //   persona_prompt: <path>   用该文件正文**替换** preset 的 persona 段
-    //   persona_clear:  true     显式**清空**（text 写空串，渲染时被丢弃）——同时也是**默认行为**
-    //   persona_clear:  false    显式**不改写**（保留 preset 原有的 persona 句）
-    // ⚠️ 与上面 global_prompt 的语义不同：global_prompt 是「空值 / 空文件即未配置、不覆盖」；
-    // 本功能默认就是「清空」，所以 clear 用**三态**表达：true / false / null（未配置 → 走默认清空）。
+    // 工作区层的三个设置键（值覆盖插件层；未写/类型不符的键不出现在结果里）。
+    // global_prompt 在工作区里是**相对会话 cwd** 的路径（与档案 file 规则一致）；
+    // 插件层的同名键是绝对路径（插件全局设置，见 features.md）。
+    const settings = normalizeLayer(ws)
+    // 工作区级 persona 替换源（见 internals.md / features.md）：
+    //   persona_prompt: <path>   用该文件正文**替换** preset 的 persona 段（优先于 persona_clear）
+    //   persona_clear:  true/false 见 core/settings.js（默认 true = 清空）
     const rawPersona = ws.persona_prompt
     const personaPrompt = typeof rawPersona === 'string' && rawPersona.trim().length > 0 ? rawPersona.trim() : null
-    const rawClear = ws.persona_clear
-    const personaClear = rawClear === true ? true : (rawClear === false ? false : null)
-    return { profiles, globalPrompt, personaPrompt, personaClear }
+    return { profiles, settings, personaPrompt }
+  }
+
+  /**
+   * 由**已知的**工作区层求生效值（同步，纯计算）：内置默认 ← 插件层 ← 工作区层。
+   * @returns { values, sources }（sources 供 `.profiles` / 诊断解释每个值来自哪一层）
+   */
+  function effectiveSettingsFrom(workspaceLayer) {
+    return {
+      values: resolveSettings(pluginLayer, workspaceLayer),
+      sources: settingsSources(pluginLayer, workspaceLayer),
+    }
+  }
+
+  /**
+   * 求某会话 cwd 的生效设置：读该工作区的 `.deepseek.yaml`（可能有）后按三层合并。
+   * 工作区没有该文件（常态）时只用前两层，不告警也不阻断。
+   */
+  async function effectiveSettings(cwd) {
+    let workspaceLayer = null
+    try {
+      workspaceLayer = (await loadWorkspace(cwd)).settings
+    } catch (err) {
+      workspaceLayer = null
+    }
+    return effectiveSettingsFrom(workspaceLayer)
   }
 
   /**
@@ -432,108 +761,192 @@ function hostCore(ctx, opts, rpc) {
   }
 
   /**
-   * 工作区开场白覆盖：把 .deepseek.yaml 的 workspace.global_prompt 指向文件的正文，
-   * 以同名 harness:identity 注册进该会话的 agent 作用域，**完全替换** DSH 默认的
-   * "You are an AI agent powered by DeepSeek Harness."。
+   * 求本会话第一方开场白（harness:identity）的落点 —— 三层设置的唯一出口。
+   *
+   * DSH 侧事实：那句 "You are an AI agent powered by DeepSeek Harness." 由
+   * `@deepseek-ai/dsh-system-prompt` 在**构造时**按自己的 config 决定是否注册进 global 层，
+   * 运行期改不了。所以本插件把 `includeHarnessIdentity` 当**等效开关**在装配层实现：
+   * 该段只注册在 global 层 → 在本会话的 agent 作用域注册同名段即可 shadow 掉它。
+   *
+   * 判定顺序（上一层命中即返回）：
+   *   1. 有效 `global_prompt` 且文件正文非空 → `text`（用自己的话替换那句）；
+   *   2. `includeHarnessIdentity === false`  → `''`（空串＝压掉那句；renderPrompt 会过滤
+   *      长度为 0 的段，不能写 `' '`，否则多出一个空段落）；
+   *   3. 否则                                → `null`（不注册，保留 DSH 默认那句）。
+   *
+   * 读盘失败（文件不存在等）**不改变开关语义**：记一条 warn，然后继续按第 2/3 步判断——
+   * 一个写错的路径不该顺手把 `includeHarnessIdentity: true` 的意图翻掉。
+   *
+   * @returns { text: string|null, file: string|null, warn: string|null }
+   *          text = null 表示「不注册覆盖」（保留 DSH 默认开场白）。
+   */
+  async function resolveIdentity(cwd) {
+    let values = resolveSettings(pluginLayer, null)
+    try {
+      values = (await effectiveSettings(cwd)).values
+    } catch (e) { /* effectiveSettings 内部已兜住读盘失败；这里只防御 */ }
+    const configured = typeof values.global_prompt === 'string' ? values.global_prompt.trim() : ''
+    let warnText = null
+    let file = null
+    if (configured.length > 0) {
+      file = configured
+      try {
+        const target = await fs.resolve(configured, { cwd })
+        const text = substitute(await fs.readText(target), cwd).trim()
+        if (text.length > 0) return { text, file, warn: null }
+        warnText = 'global_prompt 文件为空: ' + configured + '（工作区 ' + cwd + '）—— 按 includeHarnessIdentity 开关处理'
+      } catch (err) {
+        warnText = 'global_prompt 文件读取失败: ' + configured + '（工作区 ' + cwd + '）— '
+          + String((err && err.message) || err) + ' —— 按 includeHarnessIdentity 开关处理'
+      }
+    }
+    if (values.includeHarnessIdentity === false) return { text: '', file, warn: warnText }
+    return { text: null, file, warn: warnText }
+  }
+
+  /**
+   * 应用开场白落点：把 resolveIdentity() 的结果注册（或卸载）到该会话的 agent 作用域。
    *
    * 设计要点：
    * 1. 与档案（system_prompts）解耦——不依赖下拉框选择，agent/created 时对每个会话
    *    自动执行（新建 / 冷恢复 / 重启后重连 / compact / clear 全覆盖）；
-   * 2. **未配置就不覆盖**：global_prompt 键缺失 / 值非字符串或为空 / 指向的文件读取失败 /
-   *    文件内容为空——四种情况一律先 unapplyIdentity() 卸载已有覆盖，再返回 applied:false，
-   *    保留 DSH 默认开场白（只 warn，不阻断会话创建）；
-   * 3. 幂等：成功路径也是先卸载旧注册（同一 sessionId 在 compact/clear 后会换 agent 对象），
+   * 2. **三态都先卸载旧注册**：`text === null`（保留 DSH 默认）也必须走 unapplyIdentity()，
+   *    否则旧 shadow 会残留在 agent 作用域，出现「配置已删、覆盖仍在」的状态不一致；
+   * 3. 幂等：成功路径先卸载旧注册（同一 sessionId 在 compact/clear 后会换 agent 对象），
    *    再 forceCleanSection 兜底，最后注册；
    * 4. 失败绝不抛出（不阻断会话创建），返回 error 供调用方 warn。
-   * @returns { applied, file, cleaned, error }
+   * @returns { applied, mode, file, cleaned, error }
+   *          mode: 'text'（用自己的话）/ 'blank'（压掉那句）/ 'keep'（保留 DSH 默认）
    */
   async function applyIdentity(agent, sessionId, explicitCwd) {
     const cwd = agentCwd(agent) || sessionCwd(sessionId, explicitCwd)
-    if (!cwd) return { applied: false, file: null, cleaned: 0, error: '会话工作区未就绪（无法解析 cwd）' }
-    let rel
+    if (!cwd) return { applied: false, mode: 'keep', file: null, cleaned: 0, error: '会话工作区未就绪（无法解析 cwd）' }
+    let resolved
     try {
-      rel = (await loadWorkspace(cwd)).globalPrompt
+      resolved = await resolveIdentity(cwd)
     } catch (err) {
       const cleaned = unapplyIdentity(sessionId)
-      return { applied: false, file: null, cleaned, error: '读取 .deepseek.yaml 失败: ' + String((err && err.message) || err) }
+      return { applied: false, mode: 'keep', file: null, cleaned, error: '读取 .deepseek.yaml 失败: ' + String((err && err.message) || err) }
     }
-    // 未配置（键缺失 / 值非字符串 / 空值）→ 不覆盖：卸载残留注册，保留 DSH 默认开场白
-    if (!rel) return { applied: false, file: null, cleaned: unapplyIdentity(sessionId), error: null }
-    let text
-    try {
-      const target = await fs.resolve(rel, { cwd })
-      text = substitute(await fs.readText(target), cwd).trim()
-    } catch (err) {
-      const cleaned = unapplyIdentity(sessionId)
-      const msg = 'global_prompt 文件读取失败: ' + rel + '（工作区 ' + cwd + '）'
-      warn(msg + ' — ' + String((err && err.message) || err))
-      return { applied: false, file: rel, cleaned, error: msg }
-    }
-    if (text.length === 0) {
-      return { applied: false, file: rel, cleaned: unapplyIdentity(sessionId), error: 'global_prompt 文件为空，保留 DSH 默认开场白' }
+    if (resolved.warn) warnOnce('identity:' + cwd + ':' + String(resolved.file), resolved.warn)
+    // 未覆盖（保留 DSH 默认那句）→ 卸载残留注册后返回
+    if (resolved.text === null) {
+      return { applied: false, mode: 'keep', file: resolved.file, cleaned: unapplyIdentity(sessionId), error: null }
     }
     let sp
     try {
       sp = agent.ctx.systemPrompt
     } catch (e) {
-      return { applied: false, file: rel, cleaned: 0, error: String((e && e.message) || e) }
+      return { applied: false, mode: 'keep', file: resolved.file, cleaned: 0, error: String((e && e.message) || e) }
     }
-    if (!sp) return { applied: false, file: rel, cleaned: 0, error: '目标会话无 systemPrompt 服务' }
+    if (!sp) return { applied: false, mode: 'keep', file: resolved.file, cleaned: 0, error: '目标会话无 systemPrompt 服务' }
     // 注册前先卸载旧注册（含 forceCleanSection 兜底），再清一次当前层残留，最后注册
     const cleaned = unapplyIdentity(sessionId) + forceCleanSection(sp, agent, IDENTITY_SECTION)
+    const mode = resolved.text.length > 0 ? 'text' : 'blank'
     try {
-      const disposer = sp.section({ name: IDENTITY_SECTION, order: IDENTITY_ORDER, text })
-      identity.set(sessionId, { disposer, sp, agent, file: rel })
-      return { applied: true, file: rel, cleaned, error: null }
+      const disposer = sp.section({ name: IDENTITY_SECTION, order: IDENTITY_ORDER, text: resolved.text })
+      identity.set(sessionId, { disposer, sp, agent, file: resolved.file, mode })
+      return { applied: true, mode, file: resolved.file, cleaned, error: null }
     } catch (err) {
       const msg = '注册 ' + IDENTITY_SECTION + ' 覆盖失败: ' + String((err && err.message) || err)
         + ' [diag: ' + sectionDiag(sp, agent, IDENTITY_SECTION) + ']'
       warn(msg)
-      return { applied: false, file: rel, cleaned, error: msg }
+      return { applied: false, mode: 'keep', file: resolved.file, cleaned, error: msg }
     }
   }
 
   /**
-   * 求值 persona 段覆盖：读 .deepseek.yaml 的 `persona_prompt` / `persona_clear`，
-   * 需要时把替换源文件读盘并做占位符替换。
+   * 设置变更后把开场白重新算一遍：对**所有当前活跃的 agent** 重跑 applyIdentity()。
    *
-   * **默认清空**：没有 `.deepseek.yaml`、或两键都缺省，都按「清空」处理——只有显式
-   * `persona_clear: false` 才保留 preset 原有的 persona 句。
+   * 为什么需要：开场白有三种落点（覆盖正文 / 空串 / 不注册），切换落点必须重新执行
+   * 注册或卸载——`resolveIdentity()` 只在 agent/created 与切档案时被调用，光改内存不会
+   * 让已挂载的会话换过来。persona 段不需要这一步：它挂在装配监听器上、每次装配都重新求值。
    *
-   * 优先级（同一张表见 features.md）：
-   *   1. `persona_clear: true`                       → 清空（优先于 `persona_prompt`）
-   *   2. `persona_prompt: <path>`                    → 用该文件正文替换（读不到 → 不改写 + 一次性 warn）
-   *   3. `persona_clear: false`（且无 `persona_prompt`）→ 不改写（保留 preset 原句）
-   *   4. 其余（两键都缺省 / 读不到 `.deepseek.yaml`）  → **清空**（默认行为）
+   * 会话未激活/已结束时 `agents.list()` 里没有它，跳过即可——它下次 agent/created 时
+   * 自然用新值。整个过程绝不抛出（一次失败不影响其它会话）。
+   */
+  async function refreshSessions() {
+    let list = []
+    try {
+      if (typeof agents.list === 'function') list = agents.list() || []
+    } catch (e) {
+      list = []
+    }
+    for (const agent of list) {
+      const sessionId = agent && agent.id
+      if (!sessionId) continue
+      try {
+        await applyIdentity(agent, sessionId)
+      } catch (err) {
+        warn('会话 ' + sessionId + ' 设置变更后重算开场白失败: ' + String((err && err.message) || err))
+      }
+    }
+  }
+
+  /**
+   * 求值 persona 段（`deployment:persona-prefix`）的落点。
    *
-   * **每次装配都重新调用**（不缓存）——这样切档案、改 `.deepseek.yaml`、改替换源文件
-   * 之后都无需重启 DSH，也无需重挂监听器；代价是每个模型步两次小文件读。
+   * **默认清空**：三层设置全都没提这件事时按「清空」处理——只有任一层显式
+   * `persona_clear: false` 才保留 preset 原有的那句。
+   *
+   * 优先级（与 features.md 的表一致；`persona_prompt` 只存在于工作区层，是「换成自己的话」
+   * 的替换源，不做面板字段）：
+   *   1. 工作区**显式** `persona_clear: true`          → 清空（''；压过同层的 `persona_prompt`）
+   *   2. 工作区 `persona_prompt: <path>` 可读           → 用该文件正文替换
+   *   3. 三层合并后的 `persona_clear === false`        → 不改写（保留 preset 原句，返回 null）
+   *   4. 其余（含读不到 `.deepseek.yaml`）              → **清空**（默认行为）
+   *
+   * 第 1 步只看**工作区层是不是显式写了 true**：合并结果里的 true 可能来自内置默认或插件层，
+   * 那属于「没有意见」，不该压掉工作区自己给出的替换源。
+   *
+   * **每次装配都重新调用**（不缓存）——这样在设置面板改值、切档案、改 `.deepseek.yaml`、
+   * 改替换源文件之后都无需重启 DSH，也无需重挂监听器；代价是每个模型步两次小文件读。
    * 本函数**绝不抛错**：只有「显式指定了替换源却读不到」才退回「不改写」并 warn 一条。
    *
    * @returns { text: string } —— 要写进 persona 段的文本（'' = 清空）
    *          或 null —— 不改写
    */
-  async function resolvePersonaText(cwd) {
+  /**
+   * 求本会话要改写的**所有** system prompt 段：`{ [段名]: 新文本 }`。
+   * 空对象 = 无需改写（装配监听器会原样放行）。
+   *
+   * 本插件只负责**身份/人设**相关的那一段（`deployment:persona-prefix`，preset 自带的第 2 句；
+   * 第 1 句 `harness:identity` 走同名 shadow，不在这里）。
+   * 返回 map 而非单个字符串，是为了将来若要再管别的段只需加一行——但**不要**顺手去改工具说明段
+   * （`tool:*`）、`@` 引用说明（`context:file-reference`）等：那些是模型会用工具/功能的前提。
+   *
+   * **每次装配都重新调用**（不缓存）：设置面板改值、切档案、改 `.deepseek.yaml` 之后都无需重启。
+   * 读盘只做一次（`loadWorkspace`），避免同一装配重复读同一文件。
+   */
+  async function resolvePromptOverrides(cwd) {
     let ws = null
     try {
       ws = await loadWorkspace(cwd)
     } catch (err) {
-      // 缺 .deepseek.yaml 是常态（很多工作区根本没有该文件）→ 按默认清空处理，不告警
-      return { text: '' }
+      // 缺 .deepseek.yaml 是常态（很多工作区根本没有该文件）→ 按默认处理，不告警
+      ws = null
     }
-    if (ws.personaClear === true) return { text: '' }
-    if (ws.personaPrompt) {
+    const workspaceLayer = ws ? ws.settings : null
+    const values = resolveSettings(pluginLayer, workspaceLayer)
+    const out = {}
+
+    // --- persona 段（优先级见 features.md 的表）---
+    if (workspaceLayer && workspaceLayer.persona_clear === true) {
+      out[PERSONA_SECTION] = ''                       // 工作区显式清空：压过它自己的替换源
+    } else if (ws && ws.personaPrompt) {
       try {
         const target = await fs.resolve(ws.personaPrompt, { cwd })
-        return { text: substitute(await fs.readText(target), cwd).trim() }
+        out[PERSONA_SECTION] = substitute(await fs.readText(target), cwd).trim()
       } catch (err) {
         warnOnce('prompt:' + cwd + ':' + ws.personaPrompt, 'persona_prompt 文件读取失败（本次不改写，保留 preset 原有 persona）: '
           + ws.personaPrompt + '（工作区 ' + cwd + '）: ' + String((err && err.message) || err))
-        return null
+        // 读不到替换源 → 本次不改写（不放进 out）
       }
+    } else if (values.persona_clear !== false) {
+      out[PERSONA_SECTION] = ''                       // 默认（含两键都缺省）→ 清空
     }
-    if (ws.personaClear === false) return null
-    return { text: '' }   // 两键都缺省 → 默认清空
+
+    return out
   }
 
   /**
@@ -561,8 +974,8 @@ function hostCore(ctx, opts, rpc) {
       return null
     }
     if (!agentCtx || typeof agentCtx.on !== 'function') return null
-    // 段名漂移诊断：命中 0 次只报一条（DSH 若给段改名，改写会静默落空，见 internals.md 风险表）
-    let missedReported = false
+    // 段名漂移诊断：每个未命中的段名只报一条（DSH 若给段改名，改写会静默落空）
+    const missedReported = new Set()
     return agentCtx.on('system-prompt/assemble', async (_assembly, _context, next) => {
       const assembled = await next()
       // ★ 注意：next() 之后没有任何 try/catch —— 见上面第 2 条自律
@@ -573,27 +986,25 @@ function hostCore(ctx, opts, rpc) {
         cwd = null
       }
       if (!cwd) return assembled
-      const override = await resolvePersonaText(cwd)
-      // 只有显式 persona_clear: false（且无替换源）才走 null → 不改写；其余都拿到要写入的文本
-      if (!override || !assembled || !Array.isArray(assembled.sections)) return assembled
-      let hits = 0
+      const overrides = await resolvePromptOverrides(cwd)
+      const names = Object.keys(overrides)
+      if (names.length === 0 || !assembled || !Array.isArray(assembled.sections)) return assembled
+      const hit = new Set()
       const sections = assembled.sections.map((section) => {
-        if (!section || section.name !== PERSONA_SECTION) return section
-        hits++
+        if (!section || !Object.prototype.hasOwnProperty.call(overrides, section.name)) return section
+        hit.add(section.name)
         // 到装配阶段 text 已是解析后的字符串（assemble() 里对函数式 text 已调用过一次），
         // 直接赋新串是安全的；空串会在 renderPrompt 的 length 过滤里消失（= 没有这段），
         // 注意别写空格（" " 长度为 1 会被保留，反而多出一个空段落）。
-        return { ...section, text: override.text }
+        return { ...section, text: overrides[section.name] }
       })
-      if (hits === 0) {
-        if (!missedReported) {
-          missedReported = true
-          warnOnce('miss:' + sessionId, '装配结果里没有 ' + PERSONA_SECTION + ' 段（DSH 段名变更或该 preset 未挂 persona 行）'
-            + '—— persona_prompt / persona_clear 未生效，会话 ' + sessionId)
-        }
-        return assembled
+      for (const name of names) {
+        if (hit.has(name) || missedReported.has(name)) continue
+        missedReported.add(name)
+        warnOnce('miss:' + sessionId + ':' + name, '装配结果里没有 ' + name + ' 段（DSH 段名变更，或该 preset 未挂该行）'
+          + '—— 与它相关的设置本次未生效，会话 ' + sessionId)
       }
-      return { ...assembled, sections }
+      return hit.size === 0 ? assembled : { ...assembled, sections }
     })
   }
 
@@ -782,7 +1193,12 @@ function hostCore(ctx, opts, rpc) {
       const cwd = await resolveCwd(args && args.sessionId, args && args.cwd)
       if (!cwd) return { profiles: [], globalPrompt: null, error: '会话工作区未就绪（无法解析 cwd，sessionId=' + (args && args.sessionId) + '）', cwd: null }
       const ws = await loadWorkspace(cwd)
-      return { profiles: ws.profiles, globalPrompt: ws.globalPrompt, cwd }
+      // globalPrompt：三层合并后的开场白覆盖源（null = 未配覆盖，此时那句英文由
+      // includeHarnessIdentity 开关决定去留）——仅用于下拉框 tooltip。
+      const merged = effectiveSettingsFrom(ws.settings)
+      const globalPrompt = merged.values.global_prompt.length > 0 ? merged.values.global_prompt : null
+      // sources：每个字段的生效来源（工作区 / 插件 / 内置默认）——排查「改了没生效」时看它
+      return { profiles: ws.profiles, globalPrompt, sources: merged.sources, cwd }
     } catch (err) {
       return { profiles: [], globalPrompt: null, error: String((err && err.message) || err), cwd: null }
     }
@@ -793,12 +1209,76 @@ function hostCore(ctx, opts, rpc) {
     const entry = sessionId ? active.get(sessionId) : undefined
     // pending（延迟激活）中的档案也算当前选中，保证下拉框/单档案展示不跳回默认
     const queued = sessionId ? pending.get(sessionId) : undefined
-    // globalPath：本会话实际生效的 global_prompt（null = 未覆盖，用 DSH 默认开场白）
+    // 本会话开场白的当前落点：file = 覆盖源（null = 没有覆盖源），
+    // identityMode = 'text'（用覆盖正文）/ 'blank'（压掉那句）/ 'keep'（保留 DSH 默认）
     const ident = sessionId ? identity.get(sessionId) : undefined
     return {
       active: entry ? entry.profileName : (queued ? queued.profile : null),
       globalPrompt: ident ? ident.file : null,
+      identityMode: ident ? ident.mode : 'keep',
     }
+  }))
+
+  /**
+   * 设置面板读：返回**插件层**当前值 + 默认值 + 落盘位置。
+   *
+   * 面板编辑的是插件全局默认（对所有工作区生效）；工作区 `.deepseek.yaml` 的同名键
+   * 每个会话各自覆盖它，所以这里不返回「某工作区的生效值」——那是 `.profiles` 的事。
+   */
+  handles.push(rpc.handle(rpcPrefix + '.settings', async () => ({
+    values: resolveSettings(pluginLayer, null),
+    defaults: Object.assign({}, DEFAULT_SETTINGS),
+    keys: SETTINGS_KEYS.slice(),
+    patchPath,
+    writable: patchPath !== null && typeof env.writeText === 'function',
+  })))
+
+  /**
+   * 设置面板写：更新内存插件层（对所有活跃会话立即重新求值），再把受管块写回本插件
+   * 的 bundle patch（持久化，下次启动生效）。
+   *
+   * ⚠️ 落盘不触发热重载：DSH 的 HMR 只 watch profile 层与 home 层的 cordis.patch.yml，
+   * **不 watch bundle patch**。所以「立即生效」靠的是上面的内存更新；写盘只为下次启动。
+   *
+   * @returns { ok, values, patchPath, writable, warning?, error? }
+   */
+  handles.push(rpc.handle(rpcPrefix + '.settings.set', async (args) => {
+    const raw = args && args.values
+    if (!raw || typeof raw !== 'object') return { ok: false, error: 'missing values' }
+    const next = normalizeLayer(raw)
+    // 归一化会丢掉类型不符的键；三个键都必须有明确值，否则视为非法入参
+    for (const key of SETTINGS_KEYS) {
+      if (next[key] === undefined) return { ok: false, error: '字段 ' + key + ' 缺失或类型不正确' }
+    }
+    pluginLayer = next
+    const values = resolveSettings(pluginLayer, null)
+    let warning = null
+    let written = false
+    if (patchPath !== null && typeof env.writeText === 'function') {
+      const task = saveChain.then(async () => {
+        const before = typeof env.readText === 'function' ? await env.readText(patchPath) : ''
+        // applySettingsToPatch = 用 yaml 库生成受管块 + 写进文件（块外逐行不变才放行）
+        const after = applySettingsToPatch(before, pluginLayer, yamlLib)
+        await env.writeText(patchPath, after)
+      })
+      saveChain = task.catch(() => {})
+      try {
+        await task
+        written = true
+      } catch (err) {
+        warning = '设置已在本次运行生效，但写入 ' + patchPath + ' 失败（重启后会回退）: ' + String((err && err.message) || err)
+        warn(warning)
+      }
+    } else {
+      warning = '当前环境没有可写的 patch 文件，设置只在本次运行生效（重启后回退）'
+    }
+    // 应用到已挂载的会话：开场白需要重算（它的三种落点会互相切换）
+    try {
+      await refreshSessions()
+    } catch (err) {
+      warn('设置变更后刷新会话失败: ' + String((err && err.message) || err))
+    }
+    return { ok: true, values, patchPath, writable: written, warning }
   }))
 
   // 延迟激活 + 工作区开场白覆盖 + persona 段覆盖：会话 agent 发布（新会话首次 prompt /
@@ -883,10 +1363,13 @@ function hostCore(ctx, opts, rpc) {
           }
           return { ok: true, profile: name || null, pending: true, temperature: null }
         }
-        // 切档案时顺手重读 global_prompt：用户改了 .deepseek.yaml 后无需重启 DSH
+        // 切档案时顺手重算开场白：用户改了 .deepseek.yaml 或设置面板后无需重启 DSH
         const ident = await applyIdentity(agent, sessionId, explicitCwd)
         const result = await applyActivation(agent, sessionId, name, explicitCwd)
-        return Object.assign({}, result, { globalPrompt: ident && ident.applied ? ident.file : null })
+        return Object.assign({}, result, {
+          globalPrompt: ident && ident.file ? ident.file : null,
+          identityMode: ident ? ident.mode : 'keep',
+        })
       } catch (err) {
         const msg = String((err && err.message) || err)
         let extra = ''
@@ -929,13 +1412,24 @@ function hostCore(ctx, opts, rpc) {
   })
 }
 return {
-  apply(ctx) {
+  async apply(ctx, config) {
+    let yaml = null
+    try {
+      yaml = await import('yaml')
+    } catch (err) {
+      yaml = null
+    }
     hostCore(ctx, {
       sectionName: 'dsh-profile:profile',
       rpcPrefix: 'dshprofile',
     }, {
       // 动态模式：harness.handle 直接注册，handler 返回业务结果
       handle: (method, handler) => harness.handle(method, handler),
+    }, {
+      // 动态模式也能收到 cordis 传入的 config（cordis_define 的 config 字段）
+      config,
+      patchPath: null,
+      yaml,
     })
   },
 }

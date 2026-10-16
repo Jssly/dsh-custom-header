@@ -5,10 +5,15 @@
 
 ## 如何部署（下次 AI 会话操作手册）
 
-> **离线自检（无需 DSH 运行时）**：改完 `src/core/` 先跑 `node scripts/verify-offline.mjs`（93 项：真实
-> `.deepseek.yaml` 结构守护 / YAML 解析 / 多文件档案合并 / 开场白覆盖语义 / persona 段清空替换语义 /
-> 子代理档案继承 / 既有行为回归），
-> 全过再构建；改解析器、覆盖逻辑、装配监听器或会话/子代理语义时请连同该脚本一起维护（项数随用例增删变化，以脚本输出为准）。
+> **两级自检**：`node scripts/verify-offline.mjs`（纯逻辑，无需 DSH）+ 
+> `DSH_INSTALL_DIR=<dsh 包目录> node scripts/verify-dsh.mjs`（**关键验证**：用 yaml 库生成/修改的
+> patch 文件，DSH 自己的解析器与合并算法能否正确读到 —— 边界值逐字符比对 + 真实 patch 块外不受影响）。
+>
+> `verify-offline.mjs` 覆盖：真实 `.deepseek.yaml` 结构守护 / 多文件档案合并 / 开场白三种落点 /
+> persona 段清空替换 / 子代理档案继承 / 三层设置与设置面板 RPC / 受管块读写 / Client 槽注册契约 /
+> 既有行为回归），
+> 全过再构建；改解析器、覆盖逻辑、装配监听器、设置模型或会话/子代理语义时请连同该脚本一起维护
+> （项数随用例增删变化，以脚本输出为准）。
 
 > ⚠️ **部署方式分两种情况，别混用**：
 >
@@ -37,6 +42,10 @@
 > `md5sum lib/index.js "$(readlink -f ~/.dsh/profiles/web/node_modules/dsh-profile-selector)/lib/index.js"`
 > 两值必须一致（`lib/client.js`、`cordis.patch.yml` 同理）；不一致说明 profile 里还是旧构建，重启 web 也是旧行为。
 > 注意跨文件系统（`/mnt/f` 到 `~/.dsh`）pnpm 无法硬链接，只能整包拷贝。
+>
+> ⚠️ **重装会盖掉设置面板写入的受管块**：受管块（见 `internals.md`）就写在这份 `cordis.patch.yml` 里，
+> 而 `add` 是用仓库那份**整包覆盖**的。所以 `add` 之前先把面板里改过的值抄回仓库这份
+> （或直接在仓库这份里改 `config:`），否则重装即丢失。反向也成立：**仓库这份是权威**，面板改的是「本机运行值」。
 
 ### 开发模式（动态插件，默认）
 
@@ -68,6 +77,15 @@
      **默认即清空**，无需配置）；配 `persona_prompt` 则换成该文件正文、配 `persona_clear: false` 可保留 DSH 原句。同时确认工作区 `AGENTS.md`
      的注入**仍在**（语言要求 / 文件修改规范，来自 `~/.dsh/AGENTS.md`）——persona 只改一个 section，不影响档案与它。
      ⚠️ 若某会话没生效：**先看它当前是哪个模式**（minimal 的 `complete: true` 会让改写静默失效），别先翻代码。
+   - **设置面板**（pkg-30，internals.md；仅静态可落盘）：打开 DSH 设置 → 左侧出现「提示词档案」页 →
+     三个控件显示当前插件层值（默认 `includeHarnessIdentity` 未勾、`persona_clear` 已勾、`global_prompt` 空）→
+     勾上 `includeHarnessIdentity` 保存 → **当前会话立即**恢复那句英文（无需重启、无需新建会话）；
+     `global_prompt` 填一个绝对路径保存 → 该句被文件正文替换。面板底部显示写入路径，确认它是
+     `…/profiles/web/node_modules/dsh-profile-selector/cordis.patch.yml`，且该文件末尾出现受管块
+     （一对 `# >>>` / `# <<<` 整行标记夹住的 `- id: dsh-profile-selector` 条目；**别用 `grep` 判断**
+     ——注释里也有类似字样，判据见 `ops-notes.md`）。标记之外的内容必须一字不变。
+     ⚠️ 保存报「受管块标记不完整」= pkg-31 那个 bug 回归了，见 `ops-notes.md` 的排查顺序。
+     动态模式（无包目录可写）保存后会提示「只在本次运行生效」——属预期。
 7. **改动后落盘**：把更新后的核心/壳代码同步写回 `src/`，并在本 README CHANGELOG.md 版本历史登记变更。
 
 > ⚠️ **DSH 进程重启会丢动态插件**（实测 2026-08-18 发生两次）：重启 web（`dsh web`）即重启整个 DSH，
@@ -123,7 +141,13 @@
 - **读**：`fs.resolve/readText`（受 sandbox 约束；当前会话 policy=workspace-write，可读写工作区内的文件）；
   仅读 `.deepseek.yaml` 与其 `file` / `global_prompt` / `persona_prompt` 指向的提示词文件（`doc/prompts/`），
   不触碰其他数据。persona 段覆盖在**每次装配**都重读 `.deepseek.yaml`（与替换源文件），不额外落盘任何状态。
-- **写**：插件本身**不写盘**（激活状态在内存）；本仓库文件由开发期落盘维护。
+- **写**：只有一处 —— **设置面板保存**时把自己 bundle patch（安装目录下的
+  `node_modules/dsh-profile-selector/cordis.patch.yml`）里 begin/end 标记之间的受管块换掉，标记之外的
+  字节逐字节保留（临时文件 + rename 原子替换；读到 ENOENT 才当空模板，其它读失败一律抛出）。
+  写盘前还会**自校验**：块外内容必须逐行不变、回读必须等于写入值，任一不过即抛错且**不写盘**
+  （`core/patch.js` 的 `applySettingsToPatch`）。YAML 的生成与解析由 `yaml` 库负责。
+  ⚠️ 除此之外插件不写盘；档案、开场白正文、`.deepseek.yaml` 都由用户维护，插件只读。
+  运行期的会话状态（激活档案、开场白落点、设置的内存值）全在 Host 内存，进程重启即重算。
 - **作用域**：注入只影响发起激活的会话（agent 作用域 section + 该会话 `agent/request` 监听）；
   其他会话不受影响。开场白覆盖同理——`harness:identity` 只在该工作区会话的 agent 作用域内注册，
   **不修改 DSH 全局层**，故其他工作区/其他会话仍用 DSH 默认开场白（见 internals.md）。

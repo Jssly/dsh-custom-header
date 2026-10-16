@@ -29,21 +29,31 @@ function inlineCore(source) {
     .trim()
 }
 
-const yamlCore = inlineCore(read('src/core/yaml.js'))
+// 内联顺序即依赖顺序：settings（键定义）→ patch（受管块）→ host（业务）
+const settingsCore = inlineCore(read('src/core/settings.js'))
+const patchCore = inlineCore(read('src/core/patch.js'))
 const hostCore = inlineCore(read('src/core/host.js'))
 const clientCore = inlineCore(read('src/core/client.js'))
+const settingsClientCore = inlineCore(read('src/core/settings-client.js'))
 
 const dynamicHost = read('src/dynamic/host.js')
-  .replace('/*__CORE_YAML__*/', yamlCore)
+  .replace('/*__CORE_SETTINGS__*/', settingsCore)
+  .replace('/*__CORE_PATCH__*/', patchCore)
   .replace('/*__CORE_HOST__*/', hostCore)
 write('dist/dynamic/host.js', dynamicHost)
 
 const dynamicClient = read('src/dynamic/client.js')
   .replace('/*__CORE_CLIENT__*/', clientCore)
+  .replace('/*__CORE_SETTINGS_CLIENT__*/', settingsClientCore)
 write('dist/dynamic/client.js', dynamicClient)
 
 // --- 静态模式：esbuild bundle ---
-const dshExternal = ['@deepseek-ai/cordis', '@deepseek-ai/schemastery', '@deepseek-ai/dsh-*']
+// 静态 bundle 的 external：DSH 自家包 + 我们的运行时依赖。
+// ⚠️ `yaml` **必须 external**（不要打进 bundle）：该库内部有 `require('process')`，
+// 被 esbuild 打进 ESM 输出后会变成垫片调用并在加载时抛
+// 「Dynamic require of "process" is not supported」。作为依赖由 profile 的
+// node_modules 解析（package.json 已声明，`dsh plugin add` 会装上）。
+const dshExternal = ['@deepseek-ai/cordis', '@deepseek-ai/schemastery', '@deepseek-ai/dsh-*', 'yaml']
 
 await build({
   entryPoints: ['src/static/host.js'],
