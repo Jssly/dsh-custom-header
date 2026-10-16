@@ -84,4 +84,4 @@ export function apply(ctx) {
 }
 // 注意：不要 `export default apply`。DSH 0.1.2-alpha.2 的 loader `unwrapExports` 会优先取
 // exports.default 并解包成裸函数，导致插件对象上的 `inject` 丢失（静态 client 曾因此不激活，
-// 见 README §七 pkg-23 / ops-notes.md §8）。只导出 { name, inject, apply }，让 unwrap 返回完整对象。
+// 见 CHANGELOG.md pkg-23 / ops-notes.md）。只导出 { name, inject, apply }，让 unwrap 返回完整对象。

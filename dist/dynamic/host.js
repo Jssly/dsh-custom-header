@@ -105,7 +105,7 @@ function parseYaml(text) {
  * `return { apply(ctx) { hostCore(ctx, opts, rpc) } }`，静态壳
  * `export default { apply(ctx) { hostCore(ctx, opts, rpc) } }`。
  *
- * 关键机制（勿随意改动，详见 README.md「已知坑」）：
+ * 关键机制（勿随意改动，详见 internals.md）：
  * 1. 会话级串行队列 enqueue()：同一会话的 activate 严格顺序执行，杜绝注册竞态；
  * 2. forceCleanSection()：注册前直接删除层里残留的 section（disposer 在真实运行时
  *    可能静默失效，这是安全网，也是 pkg-12 修复 "already registered" 的关键）；
@@ -123,16 +123,16 @@ function parseYaml(text) {
  * 8. 子代理会话（header.origin === 'subagent'）的档案继承：agent/created 时按父会话
  *    （header.parentSession）当前档案注入，父无选择回退 default。子代理没有自己的 UI
  *    入口（one-shot 子代理会话连输入区都不存在），档案只能由 Host 侧注入——DSH 的
- *    scope 链不继承父 agent 的层，所以父会话已选档案不会自动落到子代理身上（§六-11）；
+ *    scope 链不继承父 agent 的层，所以父会话已选档案不会自动落到子代理身上（internals.md）；
  * 9. 未激活会话**一律排队**（pending）而不是报红字：sessionExists() 仅供日志诊断。
  *    它过去用 snapshot.id 匹配，而 SessionPersistenceSnapshot 的 id 在 header.id 上，
- *    恒 false → 子代理会话被误判为「不存在」，唯一一次自动加载被吞（§六-11）。
+ *    恒 false → 子代理会话被误判为「不存在」，唯一一次自动加载被吞（internals.md）。
  * 10. persona 段覆盖（workspace.persona_prompt / workspace.persona_clear）：以
  *    `system-prompt/assemble` 监听器（挂在会话 agent 作用域）改写 preset 的
  *    `deployment:persona-prefix` 段——该槽位在 agent 层**已有 owner**（preset 的
  *    `@deepseek-ai/dsh-persona` 行），同层同名 section 重复注册会抛错，所以只能改写装配
  *    结果，不能靠 shadow（与第 6 条的开场白覆盖路径不同）。⚠️ 用最强机制的代价：必须原样
- *    透传 tools/contexts/variables，且**绝不吞 next() 的异常**（§六-12）。
+ *    透传 tools/contexts/variables，且**绝不吞 next() 的异常**（internals.md）。
  *    两键都缺省 = 完全不改写，绝不误删 preset 原有的 persona。
  */
 
@@ -175,16 +175,16 @@ function hostCore(ctx, opts, rpc) {
   const active = new Map()
   // sessionId -> { disposer, sp, agent, file }：global_prompt 覆盖的当前注册
   const identity = new Map()
-  // sessionId -> { disposer, agent }：persona 段装配监听器的当前挂载（见 §六-12）
+  // sessionId -> { disposer, agent }：persona 段装配监听器的当前挂载（见 internals.md）
   const persona = new Map()
   // 一次性告警键：persona 覆盖在**每次装配**都会求值，同一问题只提醒一次，避免每步刷屏
   const warnedOnce = new Set()
   // sessionId -> 已解析的会话 cwd（缓存：切换对话时 agent 可能短暂未就绪/被 dispose，
-  // 缓存避免回退到部署级根去读错误的 .deepseek.yaml——见 README §六-7）
+  // 缓存避免回退到部署级根去读错误的 .deepseek.yaml——见 internals.md）
   const cwdCache = new Map()
   // sessionId -> { profile, cwd } 待激活档案：会话存在但 agent 尚未激活
   // （新会话空白期 / 冷会话 / DSH 重启后会话未恢复）时暂存，agent/created 后自动应用。
-  // 见 README §六-8「激活延迟」。
+  // 见 internals.md「激活延迟」。
   const pending = new Map()
   // 会话级串行队列：保证同一会话的 activate 顺序执行，杜绝注册竞态
   const chains = new Map()
@@ -373,7 +373,7 @@ function hostCore(ctx, opts, rpc) {
     // 工作区级开场白覆盖：非空字符串才是有效配置（YAML 空值/非字符串一律当未配置）
     const raw = ws.global_prompt
     const globalPrompt = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
-    // 工作区级 persona 段覆盖（见 §六-12）：
+    // 工作区级 persona 段覆盖（见 internals.md）：
     //   persona_prompt: <path> 用该文件正文**替换** preset 的 persona 段
     //   persona_clear:  true   **清空** persona 段（text 写空串，渲染时被丢弃）
     // ⚠️ 与上面 global_prompt 的语义**不同**：global_prompt 把「空值 / 空文件」都当未配置，
@@ -411,10 +411,10 @@ function hostCore(ctx, opts, rpc) {
   /**
    * 卸载本会话已注册的开场白覆盖：disposer + forceCleanSection 双保险。
    *
-   * ⚠️ disposer 在真实运行时可能静默失效（见 README §六-3），因此「未配置 / 文件不存在 /
+   * ⚠️ disposer 在真实运行时可能静默失效（见 internals.md），因此「未配置 / 文件不存在 /
    * 文件为空」这些**不覆盖**分支也必须走这里——否则旧的 harness:identity 会残留在 agent
    * 作用域继续覆盖 DSH 默认开场白，出现「配置已删、覆盖仍在」的状态不一致。
-   * 只清 scoped 层：global 层那份是 DSH 自带开场白，永远不动（见 §六-10）。
+   * 只清 scoped 层：global 层那份是 DSH 自带开场白，永远不动（见 internals.md）。
    * @returns 实际清掉的残留 section 数
    */
   function unapplyIdentity(sessionId) {
@@ -526,12 +526,12 @@ function hostCore(ctx, opts, rpc) {
   }
 
   /**
-   * 在 agent 作用域挂 `system-prompt/assemble` 监听器，改写 persona 段（§六-12）。
+   * 在 agent 作用域挂 `system-prompt/assemble` 监听器，改写 persona 段（internals.md）。
    *
    * 为什么必须用这个最强机制：persona 槽位在 agent 层已有 owner（preset 的 dsh-persona 行），
    * 同层同名注册会抛错（见 PERSONA_SECTION 注释），所以只能改写装配结果。
    *
-   * 三条自律（README §六-12）：
+   * 三条自律（internals.md）：
    *   1. 只改 sections —— tools / contexts / variables 原样透传（改坏 tools 会毁掉工具 schema，
    *      丢掉 contexts 会丢工作目录等运行时上下文，覆盖 variables 会打断 dsh-agent 在监听器里
    *      做的 provider/model 捕获）；
@@ -550,7 +550,7 @@ function hostCore(ctx, opts, rpc) {
       return null
     }
     if (!agentCtx || typeof agentCtx.on !== 'function') return null
-    // 段名漂移诊断：命中 0 次只报一条（DSH 若给段改名，改写会静默落空，见 README §六 风险表）
+    // 段名漂移诊断：命中 0 次只报一条（DSH 若给段改名，改写会静默落空，见 internals.md 风险表）
     let missedReported = false
     return agentCtx.on('system-prompt/assemble', async (_assembly, _context, next) => {
       const assembled = await next()
@@ -608,7 +608,7 @@ function hostCore(ctx, opts, rpc) {
     return { installed: true, error: null }
   }
 
-  /** 释放某会话的 persona 装配监听器（disposer 失效也不影响后续重挂，见 README §六-3）。 */
+  /** 释放某会话的 persona 装配监听器（disposer 失效也不影响后续重挂，见 internals.md）。 */
   function unapplyPersona(sessionId) {
     const prev = persona.get(sessionId)
     if (!prev) return
@@ -619,7 +619,7 @@ function hostCore(ctx, opts, rpc) {
   /**
    * 判断会话是否真实存在（内存会话表或持久化列表）。
    * 用途：activate 在 agent 未激活时区分「会话不存在」（真错误）与
-   * 「会话存在但 agent 尚未激活」（延迟激活）——见 README §六-8。
+   * 「会话存在但 agent 尚未激活」（延迟激活）——见 internals.md。
    * 查询失败时按「存在」处理：宁可延迟激活，也不误报红字。
    */
   async function sessionExists(sessionId) {
@@ -633,7 +633,7 @@ function hostCore(ctx, opts, rpc) {
         // （见 @deepseek-ai/dsh-session-persistence 的 SessionPersistenceSnapshot）。
         // 旧写法 list.some((h) => h.id === sessionId) 恒为 false，会把「已存在但未激活」的
         // 会话（典型是子代理会话）误判成「会话不存在」，直接报红字并让延迟激活失效
-        // ——见 README §六-11。这里同时兼容 header.id 与旧形态的顶层 id。
+        // ——见 internals.md。这里同时兼容 header.id 与旧形态的顶层 id。
         return Array.isArray(list) && list.some((s) => {
           const id = s && s.header ? s.header.id : (s && s.id)
           return id === sessionId
@@ -804,7 +804,7 @@ function hostCore(ctx, opts, rpc) {
     } catch (err) {
       warn('会话 ' + sessionId + ' 开场白覆盖异常: ' + String((err && err.message) || err))
     }
-    // 2) persona 段覆盖：挂装配监听器（工作区级清空/替换，见 §六-12）。
+    // 2) persona 段覆盖：挂装配监听器（工作区级清空/替换，见 internals.md）。
     //    与 1) 一样与档案选择解耦；配置求值在监听器内每次装配重做，故此处只在 agent
     //    发布时挂一次。放在 pending 分支**之前**：排队档案会提前 return，但 persona
     //    覆盖与档案无关，必须照挂。
@@ -827,7 +827,7 @@ function hostCore(ctx, opts, rpc) {
       })
     }
     // 4) 子代理会话的档案继承：子代理没有自己的界面入口（one-shot 子代理会话连输入区都不
-    //    存在，见 README §六-11），档案只能由 Host 侧在 agent/created 时注入。目标档案取
+    //    存在，见 internals.md），档案只能由 Host 侧在 agent/created 时注入。目标档案取
     //    父会话当前选择，父无选择回退 default。注册只作用于该子代理自己的 agent 作用域
     //    （DSH 的 scope 链不继承父 agent 的层，因此父会话已选档案不会自动落到子代理身上）。
     if (!isSubagentSession(agent)) return
@@ -863,7 +863,7 @@ function hostCore(ctx, opts, rpc) {
           // agent 尚未激活：新会话空白期 / 冷会话 / DSH 重启后未恢复 / **子代理会话未驻留**。
           // 一律走延迟激活：暂存档案，agent/created（或冷恢复续话）后自动应用。
           // ⚠️ 绝不在这里回「会话不存在或未激活」红字：子代理会话不驻留、且
-          // sessionPersistence 的匹配口径曾经写错（见 sessionExists 注释与 README §六-11），
+          // sessionPersistence 的匹配口径曾经写错（见 sessionExists 注释与 internals.md），
           // 误判会把唯一一次自动加载吞掉（客户端 autoFired 只触发一次）。
           if (name) pending.set(sessionId, { profile: name, cwd: explicitCwd })
           else pending.delete(sessionId)

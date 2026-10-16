@@ -1,7 +1,7 @@
 workspace:
   name: "期权分析"
   #global_prompt: doc/prompts/global.md
-  # 工作区级 persona 段覆盖（README §六-12）；两键都缺省 = 完全不改写 preset 原有 persona：
+  # 工作区级 persona 段覆盖（internals.md）；两键都缺省 = 完全不改写 preset 原有 persona：
   #   persona_prompt: <path>  用该文件正文**替换** persona 段
   #   persona_clear: true     **清空** persona 段（该键优先于 persona_prompt）
   # 当前启用「清空」：去掉 preset 自带的 "You are a coding agent powered by the {{model}} model."

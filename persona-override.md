@@ -1,13 +1,13 @@
 # persona 提示词清空 / 替换：在 dsh-profile-selector 上的实现方案
 
 > **状态**：✅ **已实现**（2026-10-16，功能版本 pkg-28）。本文档是本次改动的**设计依据**（只保留最终方案）；
-> 实现落点、坑位、验证记录以 `README.md` §六-12 与 `ops-notes.md` §11 为准，两者与本文档一一对应。
+> 实现落点、坑位、验证记录以 `internals.md` 与 ops-notes.md 为准，两者与本文档一一对应。
 > **日期**：2026-10-16
 > **适用面**：DSH Web 模式（`dsh --profile web`）；实现落在插件本体 `dsh-profile-selector`
 > （本仓库 `/mnt/f/git/node/dsh-scene`，包名与目录名不同），对**所有使用该插件的工作区**生效
 > **定位**：本文档**只保留最终采用的实现方案**；调研阶段评估过的其它路线不在此展开。
-> **关联**：`README.md` §二-7/9（`global_prompt` / persona 段覆盖）、§六-10、§六-12、§七 pkg-28、§8.2；
-> `ops-notes.md` §11
+> **关联**：`features.md`（`global_prompt` / persona 段覆盖）、internals.md、internals.md、CHANGELOG.md 的 pkg-28、deployment.md；
+> ops-notes.md
 
 ---
 
@@ -280,7 +280,7 @@ function installPromptOverride(agentCtx, resolveOverride) {
 ## 七、参考：关键文件与行号
 
 DSH 包根：`<DSH>` = `/home/j/.nvm/versions/node/<ver>/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`
-（本机当前运行 node **v22.23.2**；项目 `README.md` §一 记录的 v24.19.0 路径已过时，以实际安装为准。）
+（本机当前运行 node **v22.23.2**；项目 `README.md` 记录的 v24.19.0 路径已过时，以实际安装为准。）
 
 | 文件 | 位置 | 内容 |
 |---|---|---|
@@ -299,7 +299,7 @@ DSH 包根：`<DSH>` = `/home/j/.nvm/versions/node/<ver>/lib/node_modules/@deeps
 | `<DSH>/dsh-web-app/presets/standard.patch.yml` | 10–128 | standard 的 22 项 plugins |
 | `<DSH>/dsh-web-app/presets/minimal.patch.yml` | 4–78 | minimal 的 4 项 plugins + `complete: true`（**无 `agent-instructions`**） |
 | `<DSH>/dsh-app-boot/lib/index.js` | 2305–2336 | profile 行 preflight：缺 `name` 时抛 `startsWith` 并被禁用（§4.6） |
-| 本项目 `src/core/host.js` | 符号索引（行号随改动漂移，按符号检索） | `IDENTITY_SECTION` / `PERSONA_SECTION`（§4.3 新增）/ `applyIdentity`（disposer 管理模式）/ `applyPersona` / `resolvePersonaText` / `installPromptOverride`；说明见 README §六-12 |
+| 本项目 `src/core/host.js` | 符号索引（行号随改动漂移，按符号检索） | `IDENTITY_SECTION` / `PERSONA_SECTION`（§4.3 新增）/ `applyIdentity`（disposer 管理模式）/ `applyPersona` / `resolvePersonaText` / `installPromptOverride`；说明见 internals.md |
 
 用户侧文件：
 

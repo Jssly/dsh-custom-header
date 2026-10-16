@@ -7,10 +7,10 @@
  *   C. workspace.global_prompt：未配置 / 文件不存在 / 文件为空 → 不覆盖并清理残留
  *   D. 既有行为回归：单文件档案、temperature 注入、幂等、pending 延迟激活
  *   E. 子代理会话档案继承（继承父会话档案 / 回退 default / 不注入普通会话 / 显式优先）+ 未激活会话排队语义
- *      （sessionPersistence 快照按 header.id 匹配、cwd 兜底、不报红字）——见 README §六-11
+ *      （sessionPersistence 快照按 header.id 匹配、cwd 兜底、不报红字）——见 internals.md
  *   F. workspace.persona_prompt / persona_clear：`system-prompt/assemble` 监听器改写
  *      `deployment:persona-prefix` 段（清空 / 替换 / 两键缺省不改写 / 每次装配重新求值 /
- *      只改 sections / 异常不吞 / 段名落空诊断）——见 README §六-12
+ *      只改 sections / 异常不吞 / 段名落空诊断）——见 internals.md
  *
  * 维护须知：对**工作区真实配置**的断言只做结构守护（用户可随时增删档案、改 file 写法）；真实读盘路径
  * 由 A4-A6 用 realFs 端到端覆盖。历史教训：旧 A1-A3 写死了档案名与文件名，2026-09-15 配置改写后即整体失效。
@@ -108,13 +108,13 @@ function makeEnv(opts) {
       global: { sections: { data: global, has: (n) => global.has(n), delete: (n) => global.delete(n) } },
     }
     const requestHandlers = []
-    // system-prompt/assemble 监听器（persona 段覆盖走这条路，见 F 组 / README §六-12）
+    // system-prompt/assemble 监听器（persona 段覆盖走这条路，见 F 组 / internals.md）
     const assembleHandlers = []
     const sp = {
       layers,
       section(spec) {
         scoped.set(spec.name, { name: spec.name, order: spec.order, text: spec.text })
-        // 真实运行时 disposer 可能静默失效（README 六-3）：用 brokenDisposer 复现
+        // 真实运行时 disposer 可能静默失效（internals.md）：用 brokenDisposer 复现
         return () => { if (!brokenDisposer) scoped.delete(spec.name) }
       },
     }
@@ -380,7 +380,7 @@ function makeEnv(opts) {
  *         自动继承父会话当前档案，父无选择回退 default；普通会话不自动注入；显式选择优先。
  * E7-E11：未激活会话一律 pending 排队（不报红字）；sessionPersistence 快照按 header.id 匹配；
  *         RPC 用持久化 header 兜底解析 cwd。反向对照：把 sessionExists 的匹配改回顶层
- *         `s.id`，E7/E9 立即失败（这正是本次修复的回归点，见 README §六-11）。
+ *         `s.id`，E7/E9 立即失败（这正是本次修复的回归点，见 internals.md）。
  */
 {
   const YAML = 'workspace:\n  system_prompts:\n'
@@ -470,10 +470,10 @@ function makeEnv(opts) {
     c7.scoped.has(IDENTITY) && c7.scoped.has(SECTION), JSON.stringify([...c7.scoped.keys()]))
 }
 
-/* ---------------- F. persona 段清空/替换（workspace.persona_prompt / persona_clear，README §六-12） ----------------
+/* ---------------- F. persona 段清空/替换（workspace.persona_prompt / persona_clear，internals.md） ----------------
  * F1-F14：配置求值——清空 / 替换（含占位符）/ 两键缺省完全不改写 / clear 优先 / 空文件 / 读盘失败 /
  *          每次装配重新求值 / 段名落空诊断（一次性 warn）
- * F15-F20：§4.5 三条自律——只改 sections（tools/contexts/variables 原样透传）、不吞 next() 异常、
+ * F15-F20：persona-override.md 的三条自律——只改 sections（tools/contexts/variables 原样透传）、不吞 next() 异常、
  *          不动 name/order；以及子代理会话同样挂载、重复 agent/created 不重复挂载
  */
 {

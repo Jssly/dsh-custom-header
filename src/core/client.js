@@ -14,7 +14,7 @@
  *                     （动态 host.call / 静态 connection.rpc.call 解包 RpcResult）
  *   deps.insertCss  — 样式注入 (css) => void（动态 styles.insert / 静态 DOM style 标签）
  *
- * 关键机制（勿随意改动，详见 README.md「已知坑」）：
+ * 关键机制（勿随意改动，详见 internals.md）：
  * 1. autoFired Set：每个会话的自动加载只触发一次（防 React 严格模式双挂载重复激活）；
  * 2. 成功反馈只进 select 的 title（tooltip），不渲染行内文字——避免挤动布局导致下拉框错位；
  *    加载失败（如工作区没有 .deepseek.yaml）时不渲染下拉框（return null，不报红字）；
@@ -23,7 +23,7 @@
  *    （如 default 有 name:"分析师" → profile-分析师；dev 无 name → profile-dev）；
  *    无空值项，无"系统默认"项；
  * 4. 子代理会话（session summary.origin === 'subagent'）：客户端**不**自动加载档案
- *    （Host 侧在 agent/created 时继承父会话档案注入，见 host.js §六-11），只在 tooltip
+ *    （Host 侧在 agent/created 时继承父会话档案注入，见 host.js internals.md），只在 tooltip
  *    标注来源；profile RPC 成功时清除 fatal——首帧 cwd 未就绪的临时错误不得永久抑制下拉框。
  */
 
@@ -46,7 +46,7 @@ export function clientCore(ctx, opts, deps) {
     const sessionId = props.sessionId
     // 会话 cwd 从客户端会话 store 读取（槽位标准 prop useSessions）：
     // 切换对话时 Host 侧 agent 可能尚未就绪，store 始终可用——显式传给 RPC，
-    // 避免 Host 回退到部署级根去读错误的 .deepseek.yaml（README §六-7）
+    // 避免 Host 回退到部署级根去读错误的 .deepseek.yaml（internals.md）
     const useSessions = props.useSessions
     const summary = typeof useSessions === 'function'
       ? useSessions((s) => (sessionId ? s.byId[sessionId] : undefined))
@@ -54,7 +54,7 @@ export function clientCore(ctx, opts, deps) {
     const cwd = summary ? summary.cwd : undefined
     const summaryKnown = summary !== undefined
     // 子代理会话（DSH session summary.origin === 'subagent'）：档案由 Host 侧在
-    // agent/created 时继承父会话注入（README §六-11），客户端**不**自动加载——
+    // agent/created 时继承父会话注入（internals.md），客户端**不**自动加载——
     // 子代理多半不驻留，自动 activate 只会撞上「未激活」竞态并误报红字。
     const isSubagent = !!(summary && summary.origin === 'subagent')
     const [profiles, setProfiles] = React.useState(null)
