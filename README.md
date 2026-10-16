@@ -22,8 +22,11 @@
 ```bash
 node scripts/verify-offline.mjs            # 离线自检（90 项，零依赖，无需 DSH 运行时）
 node build.mjs                             # 构建：dist/dynamic/*（动态） + lib/*（静态）
-dsh plugin --profile web add file:$(pwd)   # 发布模式部署（之后需重启 dsh web 才生效）
+dsh plugin --profile web add file:$(pwd)   # 静态发布：走 DSH 插件安装流程（之后需重启 dsh web）
 ```
+
+> **部署口径分场景**：**静态发布（正式使用）必须走上面的 `dsh plugin` 安装流程**，不要手工把文件复制进
+> `~/.dsh/profiles/`；**动态模式 / 本地测试可以直接复制**（临时手段，测完恢复干净）。详见 `deployment.md`。
 
 ## 文档索引
 

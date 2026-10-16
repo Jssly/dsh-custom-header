@@ -32,7 +32,9 @@
 
 ## 2. 静态模式 file: 依赖是拷贝，不自动刷新
 - `dsh plugin --profile web add file:$(pwd)` 把仓库**拷贝**进 `~/.dsh/profiles/web/node_modules/dsh-profile-selector/`。
-- 改代码/构建后 pnpm 不自动刷新（报 "Already up to date"），需重装或手动 `cp` 同步 lib/ 等。
+- 改代码/构建后 pnpm 不自动刷新（报 "Already up to date"）：**静态发布必须重新
+  `dsh plugin --profile web add file:$(pwd)`**（不要手工 `cp` 进 profile——依赖记录会与实际文件不一致）；
+  **本地测试才可以直接 `cp`**（临时手段，测完恢复干净）。见 deployment.md。
 - 注意：`/plugins/*/client.js` 是**按需读取**（serveBundle 每次请求读文件），同步后**无需重启 web**，刷新页面即生效（boot rev 会自动更新）。
 - 详见 deployment.md。
 

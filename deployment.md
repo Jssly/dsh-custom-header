@@ -10,6 +10,34 @@
 > 子代理档案继承 / 既有行为回归），
 > 全过再构建；改解析器、覆盖逻辑、装配监听器或会话/子代理语义时请连同该脚本一起维护（项数随用例增删变化，以脚本输出为准）。
 
+> ⚠️ **部署方式分两种情况，别混用**：
+>
+> | 场景 | 做法 |
+> |---|---|
+> | **静态发布（正式使用）** | **必须**走 DSH 插件安装流程：`dsh plugin --profile web add file:$(pwd)`（必要时先 `remove` 再 add）。**不要手工把文件复制进 profile 目录** |
+> | **动态模式 / 本地测试** | **可以直接复制**（或改完直接 `cordis_run mode:'update'`）——测试用的临时手段，测完恢复干净即可 |
+>
+> **静态发布为什么必须走安装流程**（而不是手工 `cp`）：
+> - profile 里那份是 pnpm 管理的 `file:` 依赖拷贝。`add` 会重算依赖指纹、拷贝新版仓库、reconcile
+>   `dsh.profile.bundles` 与 `cordis.yml`——**这些都不是手工 `cp` 能做到的**；
+> - 手工 `cp -r` 只换文件、不换 package.json / lockfile / bundle 列表里的记录，会留下
+>   「文件是新的、依赖记录是旧的」半更新状态；之后 DSH 的 `add` / `remove` / 升级会按旧指纹覆盖或跳过，
+>   故障极难定位；手工复制还容易漏文件（新增文档、`cordis.patch.yml` 等）。
+>
+> **本地测试为什么可以直接复制**：动态模式的正式流程本来就不经过 profile（`cordis_define` + `cordis_run`，
+> 见上文），纯本机验证只看效果、不追求依赖记录一致，`cp` 一份进 profile 目录最快。
+> 但**测完请恢复干净**：重新 `dsh plugin --profile web add file:$(pwd)`，或
+> `dsh plugin --profile web remove dsh-profile-selector`——避免把测试现场当成发布态。
+>
+> **为什么会有"不复制就不生效"的错觉**（实测 2026-08-18）：`file:` 依赖是**拷贝**而不是符号链接，
+> 改代码 / 构建后 pnpm 不会自动刷新（`pnpm install` 报 "Already up to date"），profile 里仍是旧拷贝——
+> 这正是静态发布**必须重新 `add`** 的原因。
+>
+> **发布态重装后务必校验**（实测 2026-09-15）：不带 `remove` 直接 `add` 也能刷新成功，但要确认真的换成了新构建——
+> `md5sum lib/index.js "$(readlink -f ~/.dsh/profiles/web/node_modules/dsh-profile-selector)/lib/index.js"`
+> 两值必须一致（`lib/client.js`、`cordis.patch.yml` 同理）；不一致说明 profile 里还是旧构建，重启 web 也是旧行为。
+> 注意跨文件系统（`/mnt/f` 到 `~/.dsh`）pnpm 无法硬链接，只能整包拷贝。
+
 ### 开发模式（动态插件，默认）
 
 动态插件定义在**当前 DSH 进程内存**中；新会话/重启后需用源码重新构建并定义。步骤：
@@ -68,24 +96,12 @@
      `dsh-profile-selector-static (active)`。
 5. **卸载**：`dsh plugin --profile web remove dsh-profile-selector`（或编辑 profile 的 cordis.patch.yml 移除 insert 行）。
 
-> ⚠️ **file: 依赖是拷贝，不是符号链接**（实测 2026-08-18）：`dsh plugin add file:$(pwd)` 把仓库**拷贝**进
-> `~/.dsh/profiles/web/node_modules/dsh-profile-selector/`。改代码/构建后 pnpm 不会自动刷新
-> （`pnpm install` 报 "Already up to date"），profile 里还是旧拷贝。
-> 同步方式（任选）：① 重装 `dsh plugin --profile web add file:$(pwd)`（先 remove 更稳）；
-> ② 手动 `cp -r` 覆盖 profile 拷贝（lib/、dist/、src/、cordis.patch.yml、package.json）；
-> ③ 长期方案：改用 `link:` 或 symlink 依赖。同步后仍需重启 web 生效。
->
-> **刷新后务必校验**（实测 2026-09-15）：不带 `remove` 直接 `add` 也能刷新成功，但要确认真的换成了新拷贝——
-> `md5sum lib/index.js "$(readlink -f ~/.dsh/profiles/web/node_modules/dsh-profile-selector)/lib/index.js"`
-> 两值必须一致（`lib/client.js` 同理）；不一致说明 profile 里还是旧构建，重启 web 也是旧行为。
-> 注意跨文件系统（`/mnt/f` 到 `~/.dsh`）pnpm 无法硬链接，只能整包拷贝。
-
 ### 双模式共存注意
 
 - 开发与发布**可同时存在**（ID 全隔离，见 internals.md），但同一会话同一时刻只会被其中一套注入
   （section 名不同，互不覆盖）。若两套都激活，下拉框会出现两个（left + right），属预期。
 - 改动核心 `src/core/` 后必须**重新构建**再部署：动态走 `node build.mjs` → 重新 define/run；
-  静态走 `node build.mjs` → 同步拷贝（见 8.2 注意）→ 重启 web。
+  静态走 `node build.mjs` → `dsh plugin --profile web add file:$(pwd)` **重装插件**（见上文注意）→ 重启 web。
 
 **常用调试手段**：
 - `cordis_inspect_self dshy-1` → 版本指针 / currentPackageId / 诊断；`cordis_inspect_self dshy-1 <pkgId>` → 源码与运行错误
