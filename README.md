@@ -14,7 +14,7 @@
 > **状态**：✅ 已迁移为独立项目 `dsh-scene`（源码 + 提示词档案 + 工作区配置一体化管理，git 仓库管理，2026-08-18）
 > **版本说明**：Package 编号按插件实例计数，DSH 进程重启后重新从 pkg-1 计数（动态插件定义在进程内存，
 > 重启即丢，需重新部署——见 §8.1）；
-> 本仓库功能演进以「功能版本」为准（见 §七 版本历史，当前 = pkg-26：档案 `file` 支持**数组**（按序合并多文件提示词）+ `global_prompt` 未配置/文件缺失时**不再覆盖**）。
+> 本仓库功能演进以「功能版本」为准（见 §七 版本历史，当前 = pkg-28：`workspace.persona_prompt` / `persona_clear` 清空或替换 preset 的 persona 段 `deployment:persona-prefix`，第 1 句 `harness:identity` 走声明式开关）。
 > **档案约束**（属提示词档案内容，与插件逻辑无关）：客户不持有现货、不做备兑；标的=上证50ETF华夏（510050）。
 
 ---
@@ -31,22 +31,24 @@
 | `src/static/host.js` | 静态模式 Host 壳（ESM import 核心；`connection.rpc.handle` 适配） |
 | `src/static/client.js` | 静态模式 Client 壳（ESM import 核心；`connection.rpc.call` 适配） |
 | `build.mjs` | 双模式构建脚本（动态内联 → `dist/dynamic/`；静态 esbuild → `lib/`） |
-| `scripts/verify-offline.mjs` | **离线验证脚本**（零依赖，66 项：真实 `.deepseek.yaml` 结构守护 + YAML 解析 / 多文件合并 / 开场白覆盖语义 / 子代理档案继承 / 回归；`node scripts/verify-offline.mjs`） |
-| `cordis.patch.yml` | 静态模式挂载层（`dsh plugin` 安装时插入 loader） |
+| `scripts/verify-offline.mjs` | **离线验证脚本**（零依赖，90 项：真实 `.deepseek.yaml` 结构守护 + YAML 解析 / 多文件合并 / 开场白覆盖语义 / persona 段清空替换语义 / 子代理档案继承 / 回归；`node scripts/verify-offline.mjs`） |
+| `cordis.patch.yml` | 静态模式挂载层（`dsh plugin` 安装时插入 loader）；**顶层**另有一条 `includeHarnessIdentity: false` 覆盖，关掉第一方开场白（§六-12） |
 | `package.json` | 项目元信息（`dsh.bundle.patch` / `dsh.client` / `exports` / `build` 脚本） |
 | `dist/dynamic/{host,client}.js` | **构建产物**：动态函数体（cordis_define 用；勿手改） |
 | `lib/{index,client}.js` | **构建产物**：静态 bundle（勿手改） |
 | `doc/prompts/default.md` | 默认档案正文（期权分析角色；`{{date}}`、`{dataDir}`、`{fileDir}` 占位符） |
 | `doc/prompts/dev.md` | 开发档案正文（开发工程师角色；`{{date}}`、`{workspace}` 占位符） |
 | `doc/prompts/global.md` | **工作区级开场白覆盖正文**（由 `.deepseek.yaml` → `workspace.global_prompt` 指向；用于**替换** DSH 默认开场白 `You are an AI agent powered by DeepSeek Harness.`，见 §六-10） |
-| `.deepseek.yaml` | 工作区配置（`system_prompts` 档案源 + `global_prompt` 开场白覆盖；被插件解析，含 `parameters.temperature`）。档案 `file` 可为**字符串或字符串数组**（数组=按序合并多个提示词文件）；`global_prompt` **缺失/文件不存在时不会被覆盖**（见 §六-10） |
+| `.deepseek.yaml` | 工作区配置（`system_prompts` 档案源 + `global_prompt` 开场白覆盖 + `persona_prompt` / `persona_clear` persona 段覆盖；被插件解析，含 `parameters.temperature`）。档案 `file` 可为**字符串或字符串数组**（数组=按序合并多个提示词文件）；`global_prompt` **缺失/文件不存在时不会被覆盖**（见 §六-10）；persona 两键都缺省则**完全不改写**（见 §六-12） |
 | `README.md` | 本文档（功能 + 开发说明 + 版本史 + 已知坑） |
-| `ops-notes.md` | **运维备忘 / 已知特性与排查记录**（部署环境、profile/bundle 同步、上游版本回归、升级核查；原 `todo.md` §2，2026-09-20 拆分重命名，条目编号 1-10，见其文件头） |
+| `ops-notes.md` | **运维备忘 / 已知特性与排查记录**（部署环境、profile/bundle 同步、上游版本回归、升级核查；原 `todo.md` §2，2026-09-20 拆分重命名，条目编号 1-11，见其文件头） |
+| `persona-override.md` | **persona 提示词清空/替换的设计文档**（2026-10-16；只保留最终采用的方案，实现落点与坑位以 §六-12 为准） |
 | `pnpm-workspace.yaml` | pnpm 构建策略（`allowBuilds: esbuild: true`，允许 esbuild 跑安装脚本） |
 | `.gitignore` | 忽略 `node_modules/`、`.pnpm-store/`、`.idea/` 等 |
 
 **运行期依赖**（DSH 提供，只读参考，勿改）：
-- DSH 源码：`/home/j/.nvm/versions/node/v24.19.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`
+- DSH 源码：`/home/j/.nvm/versions/node/<ver>/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`
+  （**以本机实际安装为准**：本机当前 node `v22.23.2`；此处曾写死 `v24.19.0`，已过时——node 版本升级后路径会变）
 - 构建依赖：`esbuild`（devDependency `^0.28.2`）+ `react`（dependency `^19.2.8`，仅供静态 client bundle 的 seed word
   解析用；动态模式用闭包符号不依赖它）——均经 `pnpm install` 安装。
 
@@ -86,6 +88,26 @@
    - ⚠️ **one-shot 子代理会话没有输入区**：DSH `ui-subagent` 会用只读 composer 接管 `conversation.composer` 链，
      `conversation.input.left/right` 槽整体不渲染——这是 DSH 的既有设计，插件无法在该会话显示下拉框
      （continuable 子代理会话在有输入区时正常显示）。详见 §六-11。
+9. **persona 段清空 / 替换（`workspace.persona_prompt` / `workspace.persona_clear`，2026-10-16 新增）**：
+   去掉（或替换）系统提示词开头**由 preset 自带**的那句
+   `You are a coding agent powered by the {{model}} model.`（段名 `deployment:persona-prefix`）——
+   即 §六-10 处理的 `harness:identity`（第 1 句）之外的**第 2 句**。
+   - 与档案选择、下拉框**完全解耦**：`agent/created` 时在会话 agent 作用域挂
+     `system-prompt/assemble` 监听器，改写**装配结果**里的该段（不能用同名 shadow——该槽位在 agent 层
+     已有 owner，见 §六-12）；
+   - 配置示例（二选一，都缺省则完全不改写）：
+
+     ```yaml
+     workspace:
+       persona_clear: true                      # 清空该段（等价于"没有这段"）
+       # persona_prompt: doc/prompts/persona.md # 或：用该文件正文替换该段（路径相对会话 cwd，占位符见 §五）
+     ```
+   - **清空必须显式**：与 `global_prompt` 的「空值/空文件即未配置」语义不同，本功能的核心就是「清空」，
+     所以清空由 `persona_clear: true` 表达；替换源为空文件同样等价清空；
+   - **未配置（两键都缺省）/ 替换源文件读不到 → 完全不改写**：绝不误删 preset 原有的 persona（只记 warn）；
+   - 无 UI / RPC 变更（不新增下拉框与字段）：诊断靠 Host 日志与让会话自述 system prompt；
+   - ⚠️ **替换正文沿用原 persona 段的插值规则**：正文里完整的 `{{…}}` 仍会按 prompt variables
+     解析（未知变量会让装配抛错）；要「原样注入」就别在正文里写 `{{…}}`。
 
 ---
 
@@ -190,14 +212,14 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 - 列表实现（pkg-26）：`key:` 空值先懒创建占位对象，若该层首个内容行是 `- item` 就**原地升级为数组**。
   此前 `- item` 行被直接丢弃 → `file:` 数组被解析成 `{}` → 整个档案被 `typeof file === 'string'` 过滤掉；
 - 不支持：锚点、多行字符串（`|` / `>`）、嵌套列表、列表内 map；
-- 足够解析 `.deepseek.yaml` 的 `workspace.system_prompts.<name>.file|parameters.temperature` 与
-  `workspace.global_prompt` 结构。
+- 足够解析 `.deepseek.yaml` 的 `workspace.system_prompts.<name>.file|parameters.temperature`、
+  `workspace.global_prompt` 与 `workspace.persona_prompt|persona_clear` 结构。
 
 ---
 
 ## 五、占位符替换规则
 
-激活时对**档案正文**与 **`global_prompt` 覆盖正文**做如下替换（cwd = 会话工作区）：
+激活时对**档案正文**、**`global_prompt` 覆盖正文**与 **`persona_prompt` 覆盖正文**做如下替换（cwd = 会话工作区）：
 
 | 占位符 | 替换为 |
 |---|---|
@@ -366,12 +388,14 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 - **验证手段**：
   - 下拉框悬停 title 尾部 `· 开场白覆盖: doc/prompts/global.md`；`.state` RPC 的 `globalPrompt` 字段；
   - 观察会话 system prompt：首段应为 `doc/prompts/global.md` 正文，且不再出现 `You are an AI agent powered by DeepSeek Harness.`；
-  - 离线验证脚本 `scripts/verify-offline.mjs`（**66 项**，无需 DSH 运行时）：mock `ctx.get('fs'|'agents')` +
-    捕获 `agent/created` 监听器，断言注册的 section 名/order/文本、多文件合并顺序、失败分支不抛异常、
-    compact 重注册不撞名、global 层未被破坏，以及**「未配置 / 文件被删 / 文件被清空 → scoped 层无残留」**
+  - 离线验证脚本 `scripts/verify-offline.mjs`（**90 项**，无需 DSH 运行时）：mock `ctx.get('fs'|'agents')` +
+    捕获 `agent/created` 监听器与 `system-prompt/assemble` 瀑布，断言注册的 section 名/order/文本、
+    多文件合并顺序、失败分支不抛异常、compact 重注册不撞名、global 层未被破坏，以及
+    **「未配置 / 文件被删 / 文件被清空 → scoped 层无残留」**
     （用 `brokenDisposer` 复现 disposer 失效；反向对照：去掉 `forceCleanSection` 兜底则该 4 项失败）。
-  - pkg-27 起该脚本为 **66 项**：A 组改为「真实 `.deepseek.yaml` 结构守护 + 真实档案文件端到端解析」，
-    新增 E 组子代理继承与排队语义（见 §六-11）。
+  - 项数演进（以脚本实际输出为准）：A 组「真实 `.deepseek.yaml` 结构守护 + 真实档案文件端到端解析」
+    + E 组子代理继承与排队语义（pkg-27，见 §六-11）+ F 组 persona 段清空/替换
+    （pkg-28，22 项，含 A14/A15 真实配置端到端守护，见 §六-12）。
 
 ### 11. 子代理会话的档案继承 + 未激活会话的排队语义（2026-09-20，pkg-27 修复）
 
@@ -439,21 +463,126 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 
 **验证**
 
-- `node scripts/verify-offline.mjs` → **66/66**（E 组 14 项覆盖子代理继承 `ai`/`default` 回退、普通会话不注入、
+- `node scripts/verify-offline.mjs` → **90/90**（E 组 14 项覆盖子代理继承 `ai`/`default` 回退、普通会话不注入、
   显式选择优先、`header.id` 匹配、cwd 兜底、不报 error、开场白与档案共存）；
 - 反向对照：把 `sessionExists()` 的匹配改回顶层 `s.id` → **E9/E10 立即失败**（`cwd=null` + 误报 warn），
-  恢复后 66/66；
+  恢复后 90/90；
 - 运行时实测（2026-09-20）：让子代理转述自身 system prompt，确认修复前「有 `global_prompt` 覆盖、无档案正文」。
 
 **修复后人工验证**：新建一个 continuable 子代理 → 其 system prompt 应含
 「【当前会话已通过界面选择 .deepseek.yaml 提示词档案「<name>」…】」且角色设定与父会话一致；子代理会话不再冒红字。
+
+### 12. persona 段清空 / 替换 `deployment:persona-prefix`（2026-10-16 新增）
+
+**目标**：去掉（或替换）系统提示词开头**由 preset 自带**的那句
+`You are a coding agent powered by the {{model}} model.`（段名 `deployment:persona-prefix`，order 0）——
+即 §六-10 的 `harness:identity`（第 1 句）之外的**第 2 句**，并要能按工作区配置。
+设计依据见 `persona-override.md`。
+
+**为什么必须走 `system-prompt/assemble` 监听器（不能照搬 §六-10）**：
+
+- `@deepseek-ai/dsh-system-prompt` 的 `section()` 用 `NamedEntries` 保证**同层名字唯一**
+  （`prompt section "…" is already registered in this scope`）；
+- 而 `deployment:persona-prefix` 这个槽位在 **agent 层已有 owner**——preset 的
+  `@deepseek-ai/dsh-persona` 行（`PERSONA_PREFIX_SECTION`）就在该作用域注册同名 section。
+  DSH 自己正是靠「两边同名」让 preset 顶掉部署级那份的，插件挤不进这个槽位；
+- 与 §六-10 的差别就在这：`harness:identity` 只注册在 **global 层**（构造函数里），agent 层同名
+  shadow 可用；persona 段在 agent 层已被占用，**只能改写装配结果**。
+
+**实现落点（`src/core/host.js`）**：
+
+| 符号 | 职责 |
+|---|---|
+| `PERSONA_SECTION` | `'deployment:persona-prefix'`（段名常量，与 DSH 的 `PERSONA_PREFIX_SECTION` 同值） |
+| `loadWorkspace()` | 一次解析 `.deepseek.yaml`：档案 + `global_prompt` + `personaPrompt` / `personaClear`（唯一读盘入口） |
+| `resolvePersonaText(cwd)` | 求值覆盖（**每次装配都重新调用**，不缓存）；任何异常退化为「本次不改写」 |
+| `installPromptOverride()` | 在 agent 作用域 ctx 挂 `system-prompt/assemble` 监听器，改写该段 |
+| `applyPersona()` / `unapplyPersona()` | 挂载 / 释放（`persona` Map：sessionId → `{disposer, agent}`，`ctx.on('dispose')` 一并清理） |
+| `warnOnce()` | 一次性告警入口（装配每步都求值，同一问题不能每步刷屏） |
+
+- **挂载点**：`ctx.on('agent/created')`（与 `applyIdentity` 并列，**在 pending 排队分支之前**——
+  排队分支会提前 return，但 persona 覆盖与档案选择无关，必须照挂）。覆盖新建 / 冷恢复 /
+  DSH 重启后重连 / `compact` / `clear` 换 agent 对象；重复 `agent/created` 先释放旧监听器再重挂。
+  **子代理会话同样挂载**（与开场白覆盖同路径）。
+- **求值时机**：监听器内每次装配现读现算 → 改 `.deepseek.yaml`、改替换源文件、切档案都**无需重启
+  DSH，也无需重挂监听器**；代价是每个模型步两次小文件读。
+
+**配置键**（`.deepseek.yaml` → `workspace`）：
+
+| 键 | 语义 |
+|---|---|
+| `persona_prompt: <path>` | 用该文件正文**替换** persona 段（路径相对会话 cwd，与档案 `file` 同规则；占位符替换见 §五） |
+| `persona_clear: true` | **清空** persona 段（写入 `text: ''`；**该键优先于** `persona_prompt`） |
+| 两键都缺省 | **完全不改写**——绝不误删 preset 原有的 persona |
+
+- ⚠️ **语义与 `global_prompt` 不同**：`global_prompt` 把「空值 / 空文件」都当**未配置**；本功能的
+  目的恰恰是「清空」，所以清空必须由**显式键**表达（不能沿用「空即未配置」）。替换源为空文件 →
+  等价清空（`''`）；替换源**读不到** → 本次不改写（保留 preset 原文 + 一次性 warn）。
+- ⚠️ **要「无痕」就写空串，不要写空格**：`renderPrompt()` 结尾是
+  `.filter((text) => text.length > 0).join("\n\n")`——空串段被丢弃；`" "` 长度为 1 会被保留，
+  反而多出一个只含空格的段落。
+- ⚠️ **装配阶段 `section.text` 已是解析后的字符串**（`assemble()` 对函数式 text 已调用过一次），
+  直接赋新串是安全的。替换正文里的 `{{…}}` 仍会按原 persona 段的插值规则处理（见 §二-9 的风险说明）。
+
+**三条自律（使用最强机制的代价，勿破坏）**：
+
+1. **只改 `sections`**：`tools` / `contexts` / `variables` 必须原样透传——改坏 `tools` 会毁掉工具
+   schema，丢掉 `contexts` 会丢工作目录等运行时上下文，覆盖 `variables` 会打断 `dsh-agent` 在监听器里
+   做的 provider/model 捕获；
+2. **绝不 `catch` 掉 `next()` 的异常后返回空 assembly**：官方 waterfall 由框架调度，抛错会被上游正确
+   处理；自行吞掉再返回 `{sections: [], …}` 会让下游对 `sections` 的处理崩溃，用户侧表现为
+   「任务做到一半突然像换了个人」「状态存不下来」这类极难定位的故障（这个坑是真实踩过的）；
+3. **不动 `name` / `order`**，只改 `text`（空串即「没有这段」）——排序交给框架，避免与其它插件争位置。
+
+**段名漂移诊断**：装配结果里找不到 `deployment:persona-prefix`（DSH 改段名，或该 preset 未挂 persona 行）
+→ 原样返回 + **一条** warn（`warnOnce`）。
+
+**第 1 句 `harness:identity` 走声明式开关（不走监听器）**——落点是**插件自带的 `cordis.patch.yml` 顶层**
+（与 `- insert:` 平级）：
+
+```yaml
+# cordis.patch.yml（插件自带 patch 层，随包分发；- insert: 与它平级）
+- id: system-prompt
+  config:
+    includeHarnessIdentity: false
+```
+
+- **顶层覆盖条目不要写 `name`**：写了会被当成「新增行」解析并报
+  `disabling profile plugin row …: its declared dsh requirements cannot be validated: Cannot read properties of undefined (reading 'startsWith')`；
+- **两处只能写一处（profile 层优先级更高）**：插件 patch 是 **bundle 层**；
+  `~/.dsh/profiles/web/cordis.patch.yml`（profile 层）在**所有 bundle 层之后**应用，两处都写时 profile
+  那条会整块盖掉插件这条（并顺带替换掉插件里将来可能新增的键），是「配置不生效」类疑难杂症的源头。
+  **2026-10-16 已把该覆盖从 profile patch 搬进插件 patch**，profile patch 里原有的同款条目已删除；
+  之后重装插件（`dsh plugin --profile web add file:$(pwd)`）会自动带上这条，无需再手工维护 profile；
+- 该条目会替换 web-app 层设的 `personaPrefix`（host 层 persona 回落 `''`）：Web 会话无感（被 preset
+  的 persona 行 shadow），只影响 TUI 那类无 preset 的场景；
+- **需要重启 `dsh web` 才生效**（bundle patch 只在启动时应用，新建会话不算）。
+
+**⚠️ Minimal 模式不适用（本项目不使用该模式）**：minimal 的 persona 行带 `complete: true`，
+`assemble()` 在 waterfall **之后**把 `sections` 恢复成 `[completeSection]`，会把本监听器的改写整段丢弃
+→ **静默失效**（不报错、不警告，只是提示词里那段没被改）。
+**排查口诀：某个会话里提示词没生效 → 先看它当前是哪个模式（Standard / cordis / ptc 均可，minimal 不行），
+而不是翻代码。**
+
+**验证**：
+
+- 离线 `node scripts/verify-offline.mjs` → **90/90**（F 组 22 项：清空 / 替换 / 占位符 / 两键缺省不改写 /
+  clear 优先 / 空文件 / 读盘失败一次性 warn / 每次装配重新求值 / 段名落空 / 只改 sections / 不吞异常 /
+  不动 name·order / 子代理同样挂载 / 重复 `agent/created` 不重复挂载；A14-A15：真实 `.deepseek.yaml`
+  端到端守护，跟着配置走、不写死值）；
+- 反向对照（四次）：只返回 `{sections}` → **F5** 失败；`catch` 住异常返回空 assembly → **F19** 失败；
+  把清空写成 `' '` → **A15/F2/F3/F10/F15/F22** 六项失败；临时移除 `persona_clear` → 仍 90/90
+  （证明 A15 不写死配置值）；
+- 运行时人工验证：**新建会话** → 系统提示词里不再出现
+  `You are a coding agent powered by the …model.`，同时工作区 `AGENTS.md` 的注入（语言要求 /
+  文件修改规范）仍在（两件事互不影响：persona 只改一个 section）。
 
 ---
 
 ## 七、版本历史
 
 > **编号说明**：原插件实例按 Package 编号演进至 pkg-12（run-10）。DSH 进程重启 / 新 AI 会话重新定义后，
-> Package 编号重新从 pkg-1 计数——本仓库「功能版本」沿用原编号（当前功能版本 = pkg-27：子代理档案继承 + 未激活会话排队），
+> Package 编号重新从 pkg-1 计数——本仓库「功能版本」沿用原编号（当前功能版本 = pkg-28：persona 段清空 / 替换 + `harness:identity` 声明式关闭），
 > 每次会话实际定义的 Package 编号见 `cordis_inspect_self dshy-1`（pluginId 为 Host 分配，不可改）。
 > 例如本会话（2026-08-18 第二次）DSH 重启后动态插件丢失，重新定义为 dshy-1/pkg-1（run-1），
 > profile 文案更新为 dshy-1/pkg-2（run-2），功能等价于本表的 pkg-16。
@@ -483,8 +612,8 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 | pkg-24 | **修复 DSH 0.1.5-alpha.1 静态挂载失败（`cannot get property "webServer" without inject`）**：根因新版把 connection 插件的 inject 由 `["webServer","credentials"]` 改为 `["credentials"]`（/api 路由改 `ctx.inject(['webServer'], ...)`），而 `connection.rpc.handle` 的 owner 是 cordis 影子 Context（`symbols.shadow` = connection 服务 ctx，解析从 connection fiber 向上），故调用方怎么 inject 都无效；`src/static/host.js` 改用 `connection.register(ctx, '/rpc', handler)` 显式传 owner，壳与 patch 声明 `inject: ['connection','webServer']`。用真实 `HostConnectionService` + cordis 4.0.2 复现验证（新旧两代语义均注册 `prefix:/rpc`） | ✅ 2026-09-09 修复；需重装 `dsh plugin --profile web add file:$(pwd)` + 重启 web |
 | pkg-25 | **工作区级开场白覆盖 `workspace.global_prompt`（2026-09-15 新增）**：以同名 section `harness:identity`（order −1000）注册进 agent 作用域，按名 shadow 掉 DSH 第一方开场白 `You are an AI agent powered by DeepSeek Harness.`（`dsh-scope` 的 `ScopedLayers.merge` 语义），用于消除英文自我介绍导致的中文用户「默认英文思考」。要点：① `loadProfiles()` 重构为 `loadWorkspace()`（档案 + `global_prompt` 一次解析）；② `applyIdentity()` 随 `agent/created` 对每个会话自动执行，与档案选择解耦；③ 切档案时重读（免重启）；④ 失败绝不抛出、空文件视为未配置 → 保留 DSH 默认；⑤ ⚠️ `forceCleanSection` 加 `name` 参数且对 `harness:identity` **禁用 global 层清扫**（否则会波及所有工作区）；⑥ `.profiles`/`.state`/`.activate` 返回 `globalPrompt` 诊断字段；⑦ Client 下拉框 tooltip 追加「开场白覆盖: `<file>`」。详见 §六-10 | ✅ 离线验证 16/16 通过（mock ctx + 捕获 `agent/created`）；已重装 `file:` 副本（md5 与新建构建一致）；**需重启 `dsh web` 生效** |
 | pkg-26 | **档案 `file` 支持数组 + `global_prompt` 未配置/文件缺失时不再覆盖（2026-09-15 新增）**：① 迷你 YAML 解析器补上**标量列表**（block sequence；`key:` 空值占位在首个 `- item` 时就地升级为数组）——此前 `- item` 行被丢弃，`file:` 数组解析成 `{}` → 整个档案被 `typeof file === 'string'` 过滤掉，**数组档案根本不出现在下拉框**；② `loadWorkspace()` 用 `normalizeFiles()` 规范化 `string \| string[]`（顺序保留、空串/非字符串项忽略、无有效文件即剔除档案），档案对象新增 `files`（恒为数组=合并顺序），`file` 保持向后兼容（单文件=字符串 / 多文件=数组）；③ `profileText()` 按 `files` 顺序逐个读盘 + 占位符替换，用**空行**合并为一段正文，任一文件失败**整体失败**（错误带「档案名 + 第 i/n 个 + 文件名」）；④ `applyIdentity()` 重写并抽出 `unapplyIdentity()`（disposer + `forceCleanSection` 兜底），**未配置（键缺失/非字符串/空值）/ 文件不存在 / 文件为空 四条路径一律先卸载旧覆盖再返回 `applied:false`**，修掉「配置已删、覆盖仍在」（disposer 静默失效导致）的状态不一致；⑤ 新增 `scripts/verify-offline.mjs`（48 项断言 + 反向对照）。详见 §二-6/7、§四、§五、§六-10 | ✅ 离线验证 48/48 通过；反向对照（去掉兜底）精确复现 4 项失败（2026-09-15）；需重建 `lib/` + 同步 profile 副本 + 重启 `dsh web` 生效 |
-| pkg-27 | **修复子代理会话不加载档案 + 未激活会话误报红字（2026-09-20）**：**根因一** `sessionExists()` 用 `sessionPersistence.list()` 快照的**顶层 `s.id`** 匹配，而会话标识在 `snapshot.header.id` 上 → 恒为 false → 子代理/冷会话被误判成「会话不存在或未激活」，`activate` 直接报红字、§六-8 的延迟激活随之失效（切换会话「红字消失」只是 React 重挂载清掉 error state，档案始终没注入）；**根因二** 档案注入只由客户端 `.activate` 驱动，而 one-shot 子代理会话被 DSH 只读 composer 接管整个 `conversation.composer` 链（`conversation.input.left/right` 槽不渲染）→ 没有任何自动加载入口；**根因三** DSH scope 链不继承父 agent 的层（`composeFrom` 把子代理 scope 的父级绑到 preset standing mount，不是父 agent scope）→ 父会话已选档案不会落到子代理。**修复**：① `sessionExists()` 改用 `snapshot.header.id`（兼容旧形态）并降级为日志判据；② agent 缺失时**一律** `pending` 排队（不再返回 error，只在查无记录时 warn）；③ 新增 `persistedCwd()`/`resolveCwd()`，`.profiles` 用持久化 header 兜底解析 cwd；④ `agent/created` 对 `header.origin === 'subagent'` 的会话**继承父会话当前档案**（无选择则 `default`，显式排队优先），注册仅作用于该子代理作用域；⑤ Client 修掉「`.profiles` 成功却不清 `fatal`」竞态 + 子代理会话跳过自动加载 default + title 标注档案来源。详见 §六-11 | ✅ 离线验证 **66/66**（E 组 14 项：继承/回退/不注入/优先级/`header.id` 匹配/cwd 兜底/不报 error）；反向对照（匹配改回顶层 `s.id`）精确复现 E9/E10 失败，恢复后 66/66（2026-09-20）；**需重建 + 重载插件（动态 `cordis_run mode:'update'`／静态同步 `lib/` + 重启 web）后新建子代理验证** |
-
+| pkg-27 | **修复子代理会话不加载档案 + 未激活会话误报红字（2026-09-20）**：**根因一** `sessionExists()` 用 `sessionPersistence.list()` 快照的**顶层 `s.id`** 匹配，而会话标识在 `snapshot.header.id` 上 → 恒为 false → 子代理/冷会话被误判成「会话不存在或未激活」，`activate` 直接报红字、§六-8 的延迟激活随之失效（切换会话「红字消失」只是 React 重挂载清掉 error state，档案始终没注入）；**根因二** 档案注入只由客户端 `.activate` 驱动，而 one-shot 子代理会话被 DSH 只读 composer 接管整个 `conversation.composer` 链（`conversation.input.left/right` 槽不渲染）→ 没有任何自动加载入口；**根因三** DSH scope 链不继承父 agent 的层（`composeFrom` 把子代理 scope 的父级绑到 preset standing mount，不是父 agent scope）→ 父会话已选档案不会落到子代理。**修复**：① `sessionExists()` 改用 `snapshot.header.id`（兼容旧形态）并降级为日志判据；② agent 缺失时**一律** `pending` 排队（不再返回 error，只在查无记录时 warn）；③ 新增 `persistedCwd()`/`resolveCwd()`，`.profiles` 用持久化 header 兜底解析 cwd；④ `agent/created` 对 `header.origin === 'subagent'` 的会话**继承父会话当前档案**（无选择则 `default`，显式排队优先），注册仅作用于该子代理作用域；⑤ Client 修掉「`.profiles` 成功却不清 `fatal`」竞态 + 子代理会话跳过自动加载 default + title 标注档案来源。详见 §六-11 | ✅ 离线验证 **66/66**（E 组 14 项：继承/回退/不注入/优先级/`header.id` 匹配/cwd 兜底/不报 error）；反向对照（匹配改回顶层 `s.id`）精确复现 E9/E10 失败，恢复后 66/66（2026-09-20；**当时项数**，现脚本 90 项，见 §六-12）；**需重建 + 重载插件（动态 `cordis_run mode:'update'`／静态同步 `lib/` + 重启 web）后新建子代理验证** |
+| pkg-28 | **persona 段清空 / 替换（2026-10-16 新增）**：去掉（或替换）系统提示词开头由 preset 自带的那句 `You are a coding agent powered by the {{model}} model.`（`deployment:persona-prefix`）。**机制**：该槽位在 agent 层已有 owner（preset 的 `@deepseek-ai/dsh-persona` 行），同层同名注册会抛错 → 不能照搬 pkg-25 的「同名 shadow」，改在**会话 agent 作用域**挂 `system-prompt/assemble` 监听器改写装配结果（`installPromptOverride()`；`applyPersona()` 随 `agent/created` 挂载、`persona` Map + `dispose` 释放，子代理会话同样挂载）。**配置**（`.deepseek.yaml` → `workspace`）：`persona_prompt: <path>` 替换（占位符同 §五）/ `persona_clear: true` 清空（优先于前者）/ 两键都缺省**完全不改写**。**要点**：① 清空必须显式——不沿用 `global_prompt` 的「空即未配置」（替换源为空文件等价清空、读不到则不改写）；② 写空串而非空格（`renderPrompt` 的 `length > 0` 过滤，空格会留成空段落）；③ 三条自律——只改 `sections`（tools/contexts/variables 原样透传）、**绝不吞 `next()` 的异常后返回空 assembly**（会让下游 sections 处理崩溃，表现为「任务做到一半像换了个人」）、不动 `name`/`order`；④ 求值在**每次装配**现读现算 → 改配置无需重启/重挂，代价是每模型步两次小文件读；⑤ 段名落空 / 读盘失败 / YAML 读失败 → 原样返回 + `warnOnce` 一次性告警；⑥ 第 1 句 `harness:identity` 改走**声明式开关** `includeHarnessIdentity: false`（落在**插件自带 `cordis.patch.yml` 顶层**，**与 profile patch 二选一**——profile patch 里原有的同款条目已删除；覆盖条目不能写 `name`）；⑦ ⚠️ **Minimal 模式（`complete: true`）下会静默失效**——complete 恢复在 waterfall 之后，本项目不使用该模式。详见 §六-12 | ✅ 离线验证 **90/90**（F 组 22 项 + A14/A15 真实配置端到端守护）；四次反向对照精确复现预期失败（只返回 `{sections}` → F5；catch 后返回空 assembly → F19；清空写成 `' '` → A15/F2/F3/F10/F15/F22；移除 `persona_clear` → 仍 90/90）；需重建 `lib/` + `dsh plugin --profile web add file:$(pwd)` 重新部署（md5 校验）+ 重启 `dsh web` 后新建会话验证 |
 **仓库整理（非插件功能版本，2026-08-18）**：独立为 git 仓库 `dsh-scene`——源码落盘 `src/`、档案并入 `doc/prompts/`、
 `.deepseek.yaml` 与 `package.json` 随仓库管理，README 重构；双模式重构后删除旧的 `src/host.js`/`src/client.js`
 （已被 `src/core/` + 双壳取代），新增 `.gitignore`（忽略 node_modules/.pnpm-store/.idea）与 `pnpm-workspace.yaml`
@@ -500,9 +629,10 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 
 ## 八、如何部署（下次 AI 会话操作手册）
 
-> **离线自检（无需 DSH 运行时）**：改完 `src/core/` 先跑 `node scripts/verify-offline.mjs`（66 项：真实
-> `.deepseek.yaml` 结构守护 / YAML 解析 / 多文件档案合并 / 开场白覆盖语义 / 子代理档案继承 / 既有行为回归），
-> 全过再构建；改解析器、覆盖逻辑或会话/子代理语义时请连同该脚本一起维护（项数随用例增删变化，以脚本输出为准）。
+> **离线自检（无需 DSH 运行时）**：改完 `src/core/` 先跑 `node scripts/verify-offline.mjs`（90 项：真实
+> `.deepseek.yaml` 结构守护 / YAML 解析 / 多文件档案合并 / 开场白覆盖语义 / persona 段清空替换语义 /
+> 子代理档案继承 / 既有行为回归），
+> 全过再构建；改解析器、覆盖逻辑、装配监听器或会话/子代理语义时请连同该脚本一起维护（项数随用例增删变化，以脚本输出为准）。
 
 ### 8.1 开发模式（动态插件，默认）
 
@@ -529,6 +659,11 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
      ① 不出现红字「会话不存在或未激活」；② 悬停 title 出现 `· 子代理会话(继承父会话档案)`，档案与父会话一致
      （父选 `ai` 则子代理 `profile-分析师模式`）；③ 让子代理自述 system prompt，应含
      「当前会话已通过界面选择 .deepseek.yaml 提示词档案」段落。one-shot 子代理会话**没有输入区**属 DSH 设计（预期无下拉框）。
+   - **persona 段清空/替换**（pkg-28，§六-12；静态/动态同机制）：**新建会话** → 系统提示词里不再出现
+     preset 自带的那句 `You are a coding agent powered by the …model.`（`.deepseek.yaml` 配
+     `persona_clear: true` 时）；改配 `persona_prompt` 则换成该文件正文。同时确认工作区 `AGENTS.md`
+     的注入（语言要求 / 文件修改规范）**仍在**——persona 只改一个 section，不影响档案与 AGENTS.md。
+     ⚠️ 若某会话没生效：**先看它当前是哪个模式**（minimal 的 `complete: true` 会让改写静默失效），别先翻代码。
 7. **改动后落盘**：把更新后的核心/壳代码同步写回 `src/`，并在本 README §七 版本历史登记变更。
 
 > ⚠️ **DSH 进程重启会丢动态插件**（实测 2026-08-18 发生两次）：重启 web（`dsh web`）即重启整个 DSH，
@@ -594,11 +729,15 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 ## 九、数据流与安全边界
 
 - **读**：`fs.resolve/readText`（受 sandbox 约束；当前会话 policy=workspace-write，可读写工作区内的文件）；
-  仅读 `.deepseek.yaml` 与其 `file` / `global_prompt` 指向的提示词文件（`doc/prompts/`），不触碰其他数据。
+  仅读 `.deepseek.yaml` 与其 `file` / `global_prompt` / `persona_prompt` 指向的提示词文件（`doc/prompts/`），
+  不触碰其他数据。persona 段覆盖在**每次装配**都重读 `.deepseek.yaml`（与替换源文件），不额外落盘任何状态。
 - **写**：插件本身**不写盘**（激活状态在内存）；本仓库文件由开发期落盘维护。
 - **作用域**：注入只影响发起激活的会话（agent 作用域 section + 该会话 `agent/request` 监听）；
   其他会话不受影响。开场白覆盖同理——`harness:identity` 只在该工作区会话的 agent 作用域内注册，
   **不修改 DSH 全局层**，故其他工作区/其他会话仍用 DSH 默认开场白（见 §六-10）。
+  persona 段覆盖同理：`system-prompt/assemble` 监听器挂在**该会话 agent 自己的 ctx** 上
+  （`agent/created` 时挂载、`ctx.on('dispose')` 释放），只改写该作用域装配结果里的
+  `deployment:persona-prefix` 段——不动 preset、不动 DSH 源码（见 §六-12）。
   子代理会话的档案继承同理：注册进**该子代理自己的** agent 作用域（见 §六-11），
   不影响父会话、父会话的其他子代理，也不需要改动 DSH 源码；子代理的 cwd/血缘
   （`header.cwd`/`parentSession`/`origin`）均来自 DSH 子会话 header，插件只读不写。

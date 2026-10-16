@@ -13,6 +13,24 @@
 # （DSH 0.1.5-alpha.1 起 connection.rpc.handle 已不可用——它的 owner 是服务侧
 # 影子 Context，解析从 connection 插件 fiber 向上，调用方 inject 无效；
 # 详见 README §六-9 / ops-notes.md §9。）
+#
+# 顶层条目（与 - insert: 平级）：按 id 命中已存在的 loader 行做 config 覆盖。
+# 关掉 DSH 第一方开场白 "You are an AI agent powered by DeepSeek Harness."
+# （system prompt 的第 1 句；第 2 句 persona 段由 Host 半区的装配监听器处理，
+# 见 README §六-12 / ops-notes.md §11）。要点：
+#   · ⚠️ **不要写 `name`**：顶层条目按 id 命中既有行；写了 name 会被当成「新增行」
+#     解析，报「disabling profile plugin row …: its declared dsh requirements
+#     cannot be validated: Cannot read properties of undefined (reading 'startsWith')」；
+#   · 本 patch 是 **bundle 层**；`~/.dsh/profiles/web/cordis.patch.yml`（profile 层）
+#     在所有 bundle 层之后应用、优先级更高。**两处只能写一处**——都写时 profile 那条
+#     会整块盖掉本条目（属「配置不生效」类疑难杂症的源头）。本条已搬入本文件，
+#     profile patch 里原有的同款覆盖**必须删除**；
+#   · 本条目会替换 web-app 层给 host 设的 `personaPrefix`（host 层 persona 回落为 ""）：
+#     Web 会话无感（被 preset 的 persona 行 shadow），只影响 TUI 那类无 preset 的场景；
+#   · 需**重启 `dsh web`** 生效（bundle patch 只在启动时应用，新建会话不算）。
+- id: system-prompt
+  config:
+    includeHarnessIdentity: false
 - insert:
     - id: dsh-profile-selector
       name: dsh-profile-selector

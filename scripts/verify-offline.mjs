@@ -1,13 +1,16 @@
 /**
  * dsh-profile-selector — 离线验证脚本（无需 DSH 运行时）
  *
- * 覆盖五块：
+ * 覆盖六块：
  *   A. 真实 .deepseek.yaml 结构守护（不写死档案名/文件名）+ 迷你 YAML 解析器（block sequence 与既有 map/标量行为）
  *   B. 档案 file 支持 string | string[]：按声明顺序合并、任一文件缺失即整体失败
  *   C. workspace.global_prompt：未配置 / 文件不存在 / 文件为空 → 不覆盖并清理残留
  *   D. 既有行为回归：单文件档案、temperature 注入、幂等、pending 延迟激活
  *   E. 子代理会话档案继承（继承父会话档案 / 回退 default / 不注入普通会话 / 显式优先）+ 未激活会话排队语义
  *      （sessionPersistence 快照按 header.id 匹配、cwd 兜底、不报红字）——见 README §六-11
+ *   F. workspace.persona_prompt / persona_clear：`system-prompt/assemble` 监听器改写
+ *      `deployment:persona-prefix` 段（清空 / 替换 / 两键缺省不改写 / 每次装配重新求值 /
+ *      只改 sections / 异常不吞 / 段名落空诊断）——见 README §六-12
  *
  * 维护须知：对**工作区真实配置**的断言只做结构守护（用户可随时增删档案、改 file 写法）；真实读盘路径
  * 由 A4-A6 用 realFs 端到端覆盖。历史教训：旧 A1-A3 写死了档案名与文件名，2026-09-15 配置改写后即整体失效。
@@ -23,6 +26,7 @@ import { hostCore } from '../src/core/host.js'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SECTION = 'dsh-profile:profile'
 const IDENTITY = 'harness:identity'
+const PERSONA_SECTION = 'deployment:persona-prefix'
 
 let passed = 0
 const failures = []
@@ -104,6 +108,8 @@ function makeEnv(opts) {
       global: { sections: { data: global, has: (n) => global.has(n), delete: (n) => global.delete(n) } },
     }
     const requestHandlers = []
+    // system-prompt/assemble 监听器（persona 段覆盖走这条路，见 F 组 / README §六-12）
+    const assembleHandlers = []
     const sp = {
       layers,
       section(spec) {
@@ -117,23 +123,52 @@ function makeEnv(opts) {
       session: { header: Object.assign({ cwd }, headerExtra || {}) },
       ctx: {
         systemPrompt: sp,
-        on(event, fn) { if (event === 'agent/request') requestHandlers.push(fn); return () => {} },
+        assembleHandlers,
+        on(event, fn) {
+          const bucket = event === 'agent/request' ? requestHandlers
+            : event === 'system-prompt/assemble' ? assembleHandlers
+              : null
+          if (bucket) bucket.push(fn)
+          // 真实 disposer 会移除监听器；不可用的情形由 brokenDisposer 单独复现（见 C 组）
+          return () => {
+            if (!bucket) return
+            const i = bucket.indexOf(fn)
+            if (i >= 0) bucket.splice(i, 1)
+          }
+        },
       },
     }
     layers.scoped.set(agent, { sections: { data: scoped } })
     agents.set(sessionId, agent)
-    return { agent, scoped, global, requestHandlers }
+    return { agent, scoped, global, requestHandlers, assembleHandlers }
   }
 
   async function created(agent) {
     for (const h of (listeners.get('agent/created') || [])) await h({ agent })
+  }
+  /**
+   * 模拟一次 system-prompt/assemble 瀑布（DSH 的 scope 过滤在这里等价于「只跑该 agent
+   * 自己 ctx 上的监听器」）：按注册顺序调用，末端 next() 返回传入的 assembly。
+   * opts.throwEnd=true 让**末端** next() 抛错，用于验证监听器不吞上游异常（F19）。
+   */
+  async function assemble(agent, assembly, opts) {
+    const handlers = (agent && agent.ctx && agent.ctx.assembleHandlers) || []
+    const throwEnd = !!(opts && opts.throwEnd)
+    let i = -1
+    const next = async () => {
+      i++
+      if (i < handlers.length) return handlers[i](assembly, { agent }, next)
+      if (throwEnd) throw new Error('boom')
+      return assembly
+    }
+    return next()
   }
   function rpc(method, args) {
     const h = rpcHandlers.get('dshprofile.' + method)
     if (!h) throw new Error('no rpc handler: ' + method)
     return h(args)
   }
-  return { files, cwd, logs, makeAgent, created, rpc }
+  return { files, cwd, logs, makeAgent, created, assemble, rpc }
 }
 
 /* ---------------- A. YAML 解析 + 真实 .deepseek.yaml 守护 ---------------- */
@@ -178,6 +213,32 @@ function makeEnv(opts) {
   eq('A11 空值键无子项仍为对象', parseYaml('a:\nb: 1\n'), { a: {}, b: 1 })
   eq('A12 注释与空行忽略', parseYaml('# c\n\na: 1\n\n'), { a: 1 })
   eq('A13 单文件（标量）仍是字符串', parseYaml('file: doc/prompts/dev.md\n'), { file: 'doc/prompts/dev.md' })
+
+  // A14-A15：persona 段覆盖的真实配置守护——**不写死具体值**（用户可随时在
+  // persona_prompt / persona_clear / 两者都不写 之间切换，断言跟着配置走）
+  ok('A14 真实 .deepseek.yaml：persona_clear 若存在必为布尔、persona_prompt 若存在必为字符串',
+    (real.workspace.persona_clear === undefined || typeof real.workspace.persona_clear === 'boolean')
+    && (real.workspace.persona_prompt === undefined || typeof real.workspace.persona_prompt === 'string'),
+    JSON.stringify([real.workspace.persona_clear, real.workspace.persona_prompt]))
+  const PERSONA_KEY = real.workspace.persona_clear === true ? 'clear'
+    : typeof real.workspace.persona_prompt === 'string' ? 'prompt' : 'none'
+  await realEnv.created(realAgent.agent)
+  const realAssembly = { sections: [{ name: PERSONA_SECTION, order: 0, text: 'PRESET_PERSONA' }], contexts: [], tools: [], variables: {} }
+  const realPersonaText = ((await realEnv.assemble(realAgent.agent, realAssembly)).sections[0] || {}).text
+  let expectedPersona = 'PRESET_PERSONA'
+  if (PERSONA_KEY === 'clear') expectedPersona = ''
+  else if (PERSONA_KEY === 'prompt') {
+    // 与 src/core/host.js 的 substitute() 同规则的独立复刻：档案/开场白/persona 正文共用这套占位符
+    expectedPersona = readFileSync(join(ROOT, real.workspace.persona_prompt), 'utf8')
+      .replace(/\{\{\s*date\s*\}\}/g, today())
+      .replace(/\{workspace\}/g, ROOT)
+      .replace(/\{dataDir\}/g, ROOT + '/output')
+      .replace(/\{fileDir\}/g, ROOT + '/doc/ai')
+      .trim()
+  }
+  ok('A15 真实配置下 persona 段装配结果与配置一致（' + PERSONA_KEY + '）',
+    realPersonaText === expectedPersona,
+    'got=' + JSON.stringify(realPersonaText) + ' want=' + JSON.stringify(expectedPersona))
 }
 
 /* ---------------- B. 档案 file 多文件合并 ---------------- */
@@ -407,6 +468,110 @@ function makeEnv(opts) {
     ((((c7.scoped.get(IDENTITY) || {}).text) || '').indexOf('GLOBAL_BODY') !== -1), JSON.stringify([...c7.scoped.keys()]))
   ok('E14 开场白覆盖与档案继承互不影响（两者同时注册）',
     c7.scoped.has(IDENTITY) && c7.scoped.has(SECTION), JSON.stringify([...c7.scoped.keys()]))
+}
+
+/* ---------------- F. persona 段清空/替换（workspace.persona_prompt / persona_clear，README §六-12） ----------------
+ * F1-F14：配置求值——清空 / 替换（含占位符）/ 两键缺省完全不改写 / clear 优先 / 空文件 / 读盘失败 /
+ *          每次装配重新求值 / 段名落空诊断（一次性 warn）
+ * F15-F20：§4.5 三条自律——只改 sections（tools/contexts/variables 原样透传）、不吞 next() 异常、
+ *          不动 name/order；以及子代理会话同样挂载、重复 agent/created 不重复挂载
+ */
+{
+  const PRESET_PERSONA = 'You are a coding agent powered by the {{model}} model.'
+  // 模拟装配结果：preset 的 persona 段（agent 层已有 owner，插件只能改写它）+ 其它插件贡献
+  const makeAssembly = () => ({
+    sections: [
+      { name: IDENTITY, order: -1000, text: 'You are an AI agent powered by DeepSeek Harness.' },
+      { name: SECTION, order: -50, text: '档案正文' },
+      { name: PERSONA_SECTION, order: 0, text: PRESET_PERSONA },
+    ],
+    contexts: [{ name: 'working-directory:current', text: '/ws', interpolate: false }],
+    tools: [{ name: 'bash', description: 'x' }],
+    variables: { provider: 'p', model: 'm' },
+  })
+  const personaTextOf = (assembly) => (assembly.sections.find((s) => s.name === PERSONA_SECTION) || {}).text
+
+  // F1-F7：persona_clear: true → 清空该段，其余原样
+  const env = makeEnv({ files: { '/ws/.deepseek.yaml': 'workspace:\n  persona_clear: true\n' } })
+  const h = env.makeAgent('f-clear')
+  await env.created(h.agent)
+  ok('F1 agent/created 挂上 system-prompt/assemble 监听器', h.assembleHandlers.length === 1, String(h.assembleHandlers.length))
+
+  const a1 = makeAssembly()
+  const out1 = await env.assemble(h.agent, a1)
+  ok('F2 persona_clear → persona 段文本被清空', personaTextOf(out1) === '', JSON.stringify(personaTextOf(out1)))
+  ok('F3 清空值是空串而非空格（空格长度为 1，renderPrompt 会保留成一个空段落）',
+    String(personaTextOf(out1)).length === 0, JSON.stringify(personaTextOf(out1)))
+  ok('F4 其它 section 不受影响（开场白 / 档案段保持原文本）',
+    out1.sections.length === 3 && out1.sections[0].text === a1.sections[0].text && out1.sections[1].text === '档案正文',
+    JSON.stringify(out1.sections.map((s) => [s.name, s.text])))
+  ok('F5 只改 sections：tools / contexts / variables 原样透传（引用未变）',
+    out1.tools === a1.tools && out1.contexts === a1.contexts && out1.variables === a1.variables)
+  ok('F6 不动 name / order', out1.sections[2].name === PERSONA_SECTION && out1.sections[2].order === 0)
+  ok('F7 返回新对象且不原地改输入', out1 !== a1 && a1.sections[2].text === PRESET_PERSONA)
+
+  // F8：persona_prompt → 用文件正文替换（占位符替换与 global_prompt 同规则）
+  env.files['/ws/.deepseek.yaml'] = 'workspace:\n  persona_prompt: p/persona.md\n'
+  env.files['/ws/p/persona.md'] = '你是简洁的中文助手，工作区 {workspace}'
+  const out2 = await env.assemble(h.agent, makeAssembly())
+  eq('F8 persona_prompt → 替换为文件正文（占位符已替换）', personaTextOf(out2), '你是简洁的中文助手，工作区 /ws')
+
+  // F9：两键都缺省 → 完全不改写（同一对象直通，绝不误删 preset 原有 persona）
+  env.files['/ws/.deepseek.yaml'] = 'workspace:\n  name: 无 persona 配置\n'
+  const a3 = makeAssembly()
+  const out3 = await env.assemble(h.agent, a3)
+  ok('F9 两键缺省 → 原样返回（preset 的 persona 未被改动）',
+    out3 === a3 && a3.sections[2].text === PRESET_PERSONA, JSON.stringify(personaTextOf(out3)))
+
+  // F10：两键同时给出 → clear 优先
+  env.files['/ws/.deepseek.yaml'] = 'workspace:\n  persona_clear: true\n  persona_prompt: p/persona.md\n'
+  eq('F10 两键同时给出 → persona_clear 优先', personaTextOf(await env.assemble(h.agent, makeAssembly())), '')
+
+  // F11：替换源为空文件 → 空串（= 清空；与 global_prompt 的「空即未配置」语义不同）
+  env.files['/ws/.deepseek.yaml'] = 'workspace:\n  persona_prompt: p/persona.md\n'
+  env.files['/ws/p/persona.md'] = '   \n'
+  const out5 = await env.assemble(h.agent, makeAssembly())
+  eq('F11 替换源为空文件 → 空串（等价清空）', personaTextOf(out5), '')
+
+  // F12-F14：替换源读不到 → 不改写 + 一次性 warn
+  env.files['/ws/.deepseek.yaml'] = 'workspace:\n  persona_prompt: p/missing.md\n'
+  const a6 = makeAssembly()
+  const out6 = await env.assemble(h.agent, a6)
+  ok('F12 替换源文件不存在 → 不改写（保留 preset 原有 persona）',
+    out6 === a6 && a6.sections[2].text === PRESET_PERSONA, JSON.stringify(personaTextOf(out6)))
+  ok('F13 读盘失败记 warn（含文件名）', env.logs.filter((m) => m.indexOf('p/missing.md') !== -1).length === 1, JSON.stringify(env.logs))
+  await env.assemble(h.agent, makeAssembly())
+  ok('F14 同一问题只 warn 一次（每次装配都求值，不能每步刷屏）',
+    env.logs.filter((m) => m.indexOf('p/missing.md') !== -1).length === 1, JSON.stringify(env.logs))
+
+  // F15-F16：每次装配重新求值 —— 改配置后无需重挂监听器
+  env.files['/ws/.deepseek.yaml'] = 'workspace:\n  persona_clear: true\n'
+  eq('F15 改配置后同一监听器立即生效（无需重启 / 重挂）', personaTextOf(await env.assemble(h.agent, makeAssembly())), '')
+  ok('F16 监听器未被重挂（数量仍为 1）', h.assembleHandlers.length === 1, String(h.assembleHandlers.length))
+
+  // F17-F18：装配结果里没有 persona 段 → 原样返回 + 段名落空诊断（一次性）
+  const noPersona = () => ({ sections: [{ name: SECTION, order: -50, text: 'x' }], contexts: [], tools: [], variables: {} })
+  const a8 = noPersona()
+  const out8 = await env.assemble(h.agent, a8)
+  ok('F17 装配无 persona 段 → 原样返回', out8 === a8)
+  ok('F18 段名落空记一次 warn（DSH 段名变更诊断）',
+    env.logs.filter((m) => m.indexOf(PERSONA_SECTION) !== -1).length === 1, JSON.stringify(env.logs))
+
+  // F19：next() 的异常绝不吞（吞掉后返回空 assembly 会让下游 sections 处理崩溃）
+  const err = await env.assemble(h.agent, makeAssembly(), { throwEnd: true }).then(() => null, (e) => e)
+  ok('F19 next() 异常向上传播（未被 catch 成空 assembly / []）',
+    !!err && String(err.message).indexOf('boom') !== -1, err && String(err.message))
+
+  // F20：重复 agent/created（compact / clear 换 agent 对象）不重复挂载
+  await env.created(h.agent)
+  ok('F20 重复 agent/created 不重复挂载（先释放旧监听器）', h.assembleHandlers.length === 1, String(h.assembleHandlers.length))
+
+  // F21-F22：子代理会话同样挂载（与开场白覆盖同路径，注册只作用于该子代理自己的作用域）
+  const envSub = makeEnv({ files: { '/ws/.deepseek.yaml': 'workspace:\n  persona_clear: true\n' } })
+  const cs = envSub.makeAgent('f-sub', { origin: 'subagent', parentSession: 'f-parent' })
+  await envSub.created(cs.agent)
+  ok('F21 子代理会话同样挂上装配监听器', cs.assembleHandlers.length === 1, String(cs.assembleHandlers.length))
+  eq('F22 子代理会话的 persona 段同样被清空', personaTextOf(await envSub.assemble(cs.agent, makeAssembly())), '')
 }
 
 /* ---------------- 汇总 ---------------- */

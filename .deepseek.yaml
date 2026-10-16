@@ -1,17 +1,27 @@
 workspace:
   name: "期权分析"
-  global_prompt: doc/prompts/global.md
+  #global_prompt: doc/prompts/global.md
+  # 工作区级 persona 段覆盖（README §六-12）；两键都缺省 = 完全不改写 preset 原有 persona：
+  #   persona_prompt: <path>  用该文件正文**替换** persona 段
+  #   persona_clear: true     **清空** persona 段（该键优先于 persona_prompt）
+  # 当前启用「清空」：去掉 preset 自带的 "You are a coding agent powered by the {{model}} model."
+  persona_clear: true
   system_prompts:
+    default:
+      name: "功能开发"
+      file: doc/prompts/default.md
+      parameters:
+        temperature: 0.2
     ai:
       name: "分析师模式"
       file:
-        - doc/prompts/default.md
+        - doc/prompts/ai.md
       parameters:
         temperature: 0.2
-
-    default:
-      name: "开发者模式"
+    dev:
+      name: "期权开发模式"
       file:
         - doc/prompts/dev.md
       parameters:
         temperature: 0.2
+

@@ -8,7 +8,7 @@
 > - **核心机制与设计坑**（改代码前必读）：`README.md` §六
 > - **功能版本演进史**（pkg-N）：`README.md` §七
 >
-> 沿革：本文件原为 `todo.md` 的 §2（2026-09-20 拆分并重命名，条目编号由 2.x 重排为 1-10）；
+> 沿革：本文件原为 `todo.md` 的 §2（2026-09-20 拆分并重命名，条目编号由 2.x 重排为 1-11）；
 > 同文件原有的 §1「Toast 反馈效果」（仅讨论、未实现）已按用户要求**废弃删除**（决策记录见下方「附录」）。
 
 ---
@@ -157,10 +157,50 @@
   显式排队优先，注册只作用于该子代理作用域；⑤ Client 修「`.profiles` 成功却不清 `fatal`」的首帧竞态 +
   子代理会话跳过自动加载 default + title 标注档案来源。
 - **验证**：`node scripts/verify-offline.mjs` → **66/66**（E 组 14 项：继承/回退/不注入/优先级/`header.id` 匹配/
-  cwd 兜底/不报 error/与开场白共存）；反向对照（把匹配改回顶层 `s.id`）精确复现 E9/E10 失败，恢复后 66/66；
+  cwd 兜底/不报 error/与开场白共存）；反向对照（把匹配改回顶层 `s.id`）精确复现 E9/E10 失败，恢复后 66/66
+  （**注**：这是当时的项数，现脚本已增至 90 项，见 §11）；
   GUI 实测（2026-09-20，用户确认）：子代理会话红字消失、下拉框显示 `profile-开发者模式`，
   子代理自述 system prompt 含档案声明段且与父会话一致。根因/边界/验证全文见 README §六-11。
 - **边界（非 bug）**：one-shot 子代理会话没有输入区（DSH 设计，插件绕不过；要显示只能改挂槽位，如
   `conversation.session.header.leading`）；**历史**子代理会话提示词已定型、无法回溯注入，且其下拉框会回退显示
   `profile-<default>` 而实际未注入（2026-09-20 决定**不处理**该显示不一致）；Host 内存 `active` 随 DSH 重启清空，
   父会话重新打开时自动重载 default，之后的子代理继承那个选择。
+
+## 11. persona 段清空 / 替换 `deployment:persona-prefix`（pkg-28，2026-10-16）
+- **目标**：去掉（或替换）系统提示词开头 **preset 自带**的那句 `You are a coding agent powered by the
+  {{model}} model.`（agent 作用域的 `deployment:persona-prefix` 段）；第 1 句 `harness:identity`
+  （`You are an AI agent powered by DeepSeek Harness.`）走**声明式开关**关闭。
+- **机制**：persona 槽位在 agent 层**已有 owner**（preset 的 `@deepseek-ai/dsh-persona` 行），而
+  `systemPrompt.section()` 用 `NamedEntries` 保证同层名字唯一 → 同名 shadow 会抛
+  `prompt section "…" is already registered in this scope`。因此只能挂 `system-prompt/assemble`
+  监听器改写**装配结果**（会话 agent 作用域；`agent/created` 挂载、`ctx.on('dispose')` 释放；
+  子代理会话同样挂载）。设计依据 `persona-override.md`，机制/坑位/验证全文见 README §六-12。
+- **配置键**（`.deepseek.yaml` → `workspace`）：`persona_prompt: <path>` 替换 / `persona_clear: true` 清空
+  （优先）/ **两键都缺省 = 完全不改写**（绝不误删 preset 原有 persona）。求值在**每次装配**现读现算，
+  改配置无需重启或重挂；代价是每个模型步两次小文件读。
+- **⚠️ `includeHarnessIdentity: false` 的落点：插件自带 `cordis.patch.yml` 顶层**（与 `- insert:` 平级；
+  2026-10-16 从 profile patch **搬入**本文件）：
+
+  ```yaml
+  - id: system-prompt
+    config:
+      includeHarnessIdentity: false
+  ```
+
+  它是 **bundle 层** patch，随包分发、重装即带上；`~/.dsh/profiles/web/cordis.patch.yml`（profile 层）在
+  **所有 bundle 层之后**应用、优先级更高，**两处只能写一处**——都写时 profile 那条整块盖掉插件这条
+  （并替换掉插件里将来可能新增的键）。profile patch 里原有的同款条目**已删除**（2026-10-16，备份在
+  `/tmp/profile-cordis.patch.orig.yml`，本机临时文件）。顶层覆盖条目**不能写 `name`**：写了会被当成
+  「新增行」解析并报
+  `disabling profile plugin row …: Cannot read properties of undefined (reading 'startsWith')`。
+- **部署**：`node build.mjs` → `dsh plugin --profile web add file:$(pwd)` 重新部署（file: 依赖是**拷贝**，
+  pnpm 不会自动刷新；详见 §2 与 README §8.2，务必用 md5 校验 `lib/index.js` / `cordis.patch.yml` 与项目一致）
+  → **重启 `dsh web`**（bundle patch 与静态 bundle 只在启动时应用，新建会话不算）。
+- **排查口诀**：某个会话提示词没生效 → **先看它当前是哪个模式**（Standard / cordis / ptc 均可；
+  **minimal 的 `complete: true` 会让本改写静默失效**——complete 恢复发生在 waterfall 之后，无报错无警告），
+  而不是翻代码。本项目不使用 Minimal 模式。
+- **验证**：`node scripts/verify-offline.mjs` → **90/90**（新增 F 组 22 项 + A14/A15 真实 `.deepseek.yaml`
+  端到端守护）；四次反向对照精确复现预期失败（只返回 `{sections}` → F5；`catch` 后返回空 assembly → F19；
+  清空写成 `' '` → A15/F2/F3/F10/F15/F22；临时移除 `persona_clear` → 仍 90/90，证明守护跟着真实配置走）。
+- **已知边界**：替换正文沿用原 persona 段的插值规则（正文里完整的 `{{…}}` 会按 prompt variables 解析，
+  未知变量会让装配抛错）；persona 覆盖对**该工作区的所有会话（含子代理）**生效，与档案选择解耦。

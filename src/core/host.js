@@ -36,6 +36,13 @@
  * 9. 未激活会话**一律排队**（pending）而不是报红字：sessionExists() 仅供日志诊断。
  *    它过去用 snapshot.id 匹配，而 SessionPersistenceSnapshot 的 id 在 header.id 上，
  *    恒 false → 子代理会话被误判为「不存在」，唯一一次自动加载被吞（§六-11）。
+ * 10. persona 段覆盖（workspace.persona_prompt / workspace.persona_clear）：以
+ *    `system-prompt/assemble` 监听器（挂在会话 agent 作用域）改写 preset 的
+ *    `deployment:persona-prefix` 段——该槽位在 agent 层**已有 owner**（preset 的
+ *    `@deepseek-ai/dsh-persona` 行），同层同名 section 重复注册会抛错，所以只能改写装配
+ *    结果，不能靠 shadow（与第 6 条的开场白覆盖路径不同）。⚠️ 用最强机制的代价：必须原样
+ *    透传 tools/contexts/variables，且**绝不吞 next() 的异常**（§六-12）。
+ *    两键都缺省 = 完全不改写，绝不误删 preset 原有的 persona。
  */
 import { parseYaml } from './yaml.js'
 
@@ -61,11 +68,27 @@ export function hostCore(ctx, opts, rpc) {
   const IDENTITY_SECTION = 'harness:identity'
   /** 与 SECTION_ORDERS.HARNESS_IDENTITY 对齐，保证替换后仍是 system prompt 最前一段。 */
   const IDENTITY_ORDER = -1000
+  /**
+   * DSH 部署级 persona 段名（SECTION_ORDERS.DEPLOYMENT_PERSONA_PREFIX = 0，即
+   * "You are a coding agent powered by the {{model}} model." 那一句所在段）。
+   *
+   * 与开场白的关键差异：该段在 agent 层的槽位**已有 owner**——preset 的
+   * `@deepseek-ai/dsh-persona` 行就在该作用域注册同名 section；而 systemPrompt 的
+   * section() 用 NamedEntries 保证**同层名字唯一**（重复注册抛
+   * `prompt section "..." is already registered in this scope`），所以覆盖它**不能**
+   * 走同名 shadow，只能在装配结果上改写（见 installPromptOverride）。DSH 自己也是靠
+   * 「两边同名」让 preset 顶掉部署级那份的，本插件不能挤进去抢这个槽位。
+   */
+  const PERSONA_SECTION = 'deployment:persona-prefix'
   const rpcPrefix = opts.rpcPrefix
   // sessionId -> { profileName, disposer, disposeTemp, temperature, sp, agent }
   const active = new Map()
   // sessionId -> { disposer, sp, agent, file }：global_prompt 覆盖的当前注册
   const identity = new Map()
+  // sessionId -> { disposer, agent }：persona 段装配监听器的当前挂载（见 §六-12）
+  const persona = new Map()
+  // 一次性告警键：persona 覆盖在**每次装配**都会求值，同一问题只提醒一次，避免每步刷屏
+  const warnedOnce = new Set()
   // sessionId -> 已解析的会话 cwd（缓存：切换对话时 agent 可能短暂未就绪/被 dispose，
   // 缓存避免回退到部署级根去读错误的 .deepseek.yaml——见 README §六-7）
   const cwdCache = new Map()
@@ -80,6 +103,16 @@ export function hostCore(ctx, opts, rpc) {
   /** 统一告警出口：logger 缺失或抛错都不影响主流程。 */
   function warn(message) {
     try { if (ctx.logger && typeof ctx.logger.warn === 'function') ctx.logger.warn('[dsh-profile-selector] ' + message) } catch (e) { /* noop */ }
+  }
+
+  /**
+   * 同 key 只告警一次（key 通常含 cwd / 文件名）。
+   * persona 覆盖的求值发生在**每次装配**上，同一配置问题不去重会每个模型步刷一条日志。
+   */
+  function warnOnce(key, message) {
+    if (warnedOnce.has(key)) return
+    warnedOnce.add(key)
+    warn(message)
   }
 
   /** 从 agent 的会话 header 读取 cwd（agent 未激活/字段缺失时返回 null）。 */
@@ -219,8 +252,9 @@ export function hostCore(ctx, opts, rpc) {
 
   /**
    * 解析工作区 .deepseek.yaml 的 workspace 段——**唯一读盘入口**：
-   * 档案列表与开场白覆盖共用一次解析，避免同一会话重复读同一文件。
-   * @returns { profiles, globalPrompt }（globalPrompt 为 null 表示未配置或值无效）
+   * 档案列表、开场白覆盖与 persona 段覆盖共用一次解析，避免同一会话重复读同一文件。
+   * @returns { profiles, globalPrompt, personaPrompt, personaClear }
+   *   （globalPrompt / personaPrompt 为 null 表示未配置或值无效）
    */
   async function loadWorkspace(cwd) {
     const target = await fs.resolve('.deepseek.yaml', { cwd })
@@ -249,7 +283,16 @@ export function hostCore(ctx, opts, rpc) {
     // 工作区级开场白覆盖：非空字符串才是有效配置（YAML 空值/非字符串一律当未配置）
     const raw = ws.global_prompt
     const globalPrompt = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
-    return { profiles, globalPrompt }
+    // 工作区级 persona 段覆盖（见 §六-12）：
+    //   persona_prompt: <path> 用该文件正文**替换** preset 的 persona 段
+    //   persona_clear:  true   **清空** persona 段（text 写空串，渲染时被丢弃）
+    // ⚠️ 与上面 global_prompt 的语义**不同**：global_prompt 把「空值 / 空文件」都当未配置，
+    // 而本功能的目的是「清空」，所以清空必须由**显式键**表达；只有两键都缺省才算未配置
+    // （未配置 = 完全不改写，绝不误删 preset 原有的 persona）。
+    const rawPersona = ws.persona_prompt
+    const personaPrompt = typeof rawPersona === 'string' && rawPersona.trim().length > 0 ? rawPersona.trim() : null
+    const personaClear = ws.persona_clear === true
+    return { profiles, globalPrompt, personaPrompt, personaClear }
   }
 
   /**
@@ -356,6 +399,131 @@ export function hostCore(ctx, opts, rpc) {
       warn(msg)
       return { applied: false, file: rel, cleaned, error: msg }
     }
+  }
+
+  /**
+   * 求值 persona 段覆盖：读 .deepseek.yaml 的 `persona_prompt` / `persona_clear`，
+   * 需要时把替换源文件读盘并做占位符替换。
+   *
+   * **每次装配都重新调用**（不缓存）——这样切档案、改 `.deepseek.yaml`、改替换源文件
+   * 之后都无需重启 DSH，也无需重挂监听器；代价是每个模型步两次小文件读。
+   * 本函数**绝不抛错**：任何读盘/解析异常都退化为「本次不改写」（warn 一条带文件名，
+   * 同 key 只报一次）——宁可不生效，也不静默把 preset 原有的 persona 抹掉。
+   *
+   * @returns { text: string } —— 要写进 persona 段的文本（'' = 清空）
+   *          或 null —— 不改写（未配置 / 求值失败）
+   */
+  async function resolvePersonaText(cwd) {
+    let ws
+    try {
+      ws = await loadWorkspace(cwd)
+    } catch (err) {
+      warnOnce('yaml:' + cwd, '读取 .deepseek.yaml 失败（persona 覆盖本次跳过）: '
+        + String((err && err.message) || err) + '（工作区 ' + cwd + '）')
+      return null
+    }
+    // 显式清空优先：两键同时给出时以 persona_clear 为准（「清空」是更强的显式意图）
+    if (ws.personaClear) return { text: '' }
+    if (!ws.personaPrompt) return null
+    try {
+      const target = await fs.resolve(ws.personaPrompt, { cwd })
+      return { text: substitute(await fs.readText(target), cwd).trim() }
+    } catch (err) {
+      warnOnce('prompt:' + cwd + ':' + ws.personaPrompt, 'persona_prompt 文件读取失败（persona 覆盖本次跳过，保留 preset 原有 persona）: '
+        + ws.personaPrompt + '（工作区 ' + cwd + '）: ' + String((err && err.message) || err))
+      return null
+    }
+  }
+
+  /**
+   * 在 agent 作用域挂 `system-prompt/assemble` 监听器，改写 persona 段（§六-12）。
+   *
+   * 为什么必须用这个最强机制：persona 槽位在 agent 层已有 owner（preset 的 dsh-persona 行），
+   * 同层同名注册会抛错（见 PERSONA_SECTION 注释），所以只能改写装配结果。
+   *
+   * 三条自律（README §六-12）：
+   *   1. 只改 sections —— tools / contexts / variables 原样透传（改坏 tools 会毁掉工具 schema，
+   *      丢掉 contexts 会丢工作目录等运行时上下文，覆盖 variables 会打断 dsh-agent 在监听器里
+   *      做的 provider/model 捕获）；
+   *   2. **绝不 try/catch 掉 next() 的异常** —— 官方 waterfall 由框架调度，抛错会被上游正确处理；
+   *      一旦自行吞掉异常再返回空 assembly（sections: [] / tools: []），下游对 sections 的处理会崩，
+   *      用户侧表现为「任务做到一半像换了个人」「状态存不下来」这类极难定位的故障；
+   *   3. 只改 text（以及按需整段删除）—— 不动 name / order，排序交给框架，避免与其它插件争位置。
+   *
+   * @returns disposer，或 null（该 agent 没有可挂的 ctx）
+   */
+  function installPromptOverride(agent, sessionId) {
+    let agentCtx
+    try {
+      agentCtx = agent && agent.ctx
+    } catch (e) {
+      return null
+    }
+    if (!agentCtx || typeof agentCtx.on !== 'function') return null
+    // 段名漂移诊断：命中 0 次只报一条（DSH 若给段改名，改写会静默落空，见 README §六 风险表）
+    let missedReported = false
+    return agentCtx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+      const assembled = await next()
+      // ★ 注意：next() 之后没有任何 try/catch —— 见上面第 2 条自律
+      let cwd
+      try {
+        cwd = agentCwd(agent) || sessionCwd(sessionId)
+      } catch (e) {
+        cwd = null
+      }
+      if (!cwd) return assembled
+      const override = await resolvePersonaText(cwd)
+      // 未配置 / 求值失败 → 完全不改写（绝不误删 preset 原有的 persona）
+      if (!override || !assembled || !Array.isArray(assembled.sections)) return assembled
+      let hits = 0
+      const sections = assembled.sections.map((section) => {
+        if (!section || section.name !== PERSONA_SECTION) return section
+        hits++
+        // 到装配阶段 text 已是解析后的字符串（assemble() 里对函数式 text 已调用过一次），
+        // 直接赋新串是安全的；空串会在 renderPrompt 的 length 过滤里消失（= 没有这段），
+        // 注意别写空格（" " 长度为 1 会被保留，反而多出一个空段落）。
+        return { ...section, text: override.text }
+      })
+      if (hits === 0) {
+        if (!missedReported) {
+          missedReported = true
+          warnOnce('miss:' + sessionId, '装配结果里没有 ' + PERSONA_SECTION + ' 段（DSH 段名变更或该 preset 未挂 persona 行）'
+            + '—— persona_prompt / persona_clear 未生效，会话 ' + sessionId)
+        }
+        return assembled
+      }
+      return { ...assembled, sections }
+    })
+  }
+
+  /**
+   * persona 段覆盖的挂载入口：先释放该会话的旧监听器（幂等，compact / clear 换 agent 对象后重挂），
+   * 再挂到新 agent 的 ctx 上。**不做配置预检**——监听器每次装配自行求值，
+   * 因此这里只在 agent/created 时调用一次即可覆盖该会话的全部后续装配。
+   * 失败绝不抛出（不阻断会话创建），返回 error 供调用方 warn。
+   * @returns { installed, error }
+   */
+  function applyPersona(agent, sessionId) {
+    unapplyPersona(sessionId)
+    let disposer
+    try {
+      disposer = installPromptOverride(agent, sessionId)
+    } catch (err) {
+      const msg = '挂 ' + PERSONA_SECTION + ' 装配监听器失败: ' + String((err && err.message) || err)
+      warn(msg)
+      return { installed: false, error: msg }
+    }
+    if (!disposer) return { installed: false, error: '目标会话无 agent.ctx（无法挂装配监听器）' }
+    persona.set(sessionId, { disposer, agent })
+    return { installed: true, error: null }
+  }
+
+  /** 释放某会话的 persona 装配监听器（disposer 失效也不影响后续重挂，见 README §六-3）。 */
+  function unapplyPersona(sessionId) {
+    const prev = persona.get(sessionId)
+    if (!prev) return
+    try { prev.disposer() } catch (e) { /* noop */ }
+    persona.delete(sessionId)
   }
 
   /**
@@ -532,8 +700,8 @@ export function hostCore(ctx, opts, rpc) {
     }
   }))
 
-  // 延迟激活 + 工作区开场白覆盖：会话 agent 发布（新会话首次 prompt / 冷会话恢复 /
-  // DSH 重启后重连 / compact / clear 换 agent 对象）时触发。
+  // 延迟激活 + 工作区开场白覆盖 + persona 段覆盖：会话 agent 发布（新会话首次 prompt /
+  // 冷会话恢复 / DSH 重启后重连 / compact / clear 换 agent 对象）时触发。
   // 事件形状：'agent/created'(this: Scoped<Agent>, payload: { agent, source, signal })
   // 由 ctx.serial 串行派发并 await，故此处可安全 await 读盘。
   const stopCreated = ctx.on('agent/created', async ({ agent }) => {
@@ -546,7 +714,17 @@ export function hostCore(ctx, opts, rpc) {
     } catch (err) {
       warn('会话 ' + sessionId + ' 开场白覆盖异常: ' + String((err && err.message) || err))
     }
-    // 2) 延迟激活：应用排队中的档案（**优先于**下面的子代理继承——那是 UI/调用方的显式选择）
+    // 2) persona 段覆盖：挂装配监听器（工作区级清空/替换，见 §六-12）。
+    //    与 1) 一样与档案选择解耦；配置求值在监听器内每次装配重做，故此处只在 agent
+    //    发布时挂一次。放在 pending 分支**之前**：排队档案会提前 return，但 persona
+    //    覆盖与档案无关，必须照挂。
+    try {
+      const pinned = applyPersona(agent, sessionId)
+      if (!pinned.installed) warn('会话 ' + sessionId + ' persona 段覆盖未挂载: ' + pinned.error)
+    } catch (err) {
+      warn('会话 ' + sessionId + ' persona 段覆盖异常: ' + String((err && err.message) || err))
+    }
+    // 3) 延迟激活：应用排队中的档案（**优先于**下面的子代理继承——那是 UI/调用方的显式选择）
     const req = pending.get(sessionId)
     if (req) {
       pending.delete(sessionId)
@@ -558,7 +736,7 @@ export function hostCore(ctx, opts, rpc) {
         }
       })
     }
-    // 3) 子代理会话的档案继承：子代理没有自己的界面入口（one-shot 子代理会话连输入区都不
+    // 4) 子代理会话的档案继承：子代理没有自己的界面入口（one-shot 子代理会话连输入区都不
     //    存在，见 README §六-11），档案只能由 Host 侧在 agent/created 时注入。目标档案取
     //    父会话当前选择，父无选择回退 default。注册只作用于该子代理自己的 agent 作用域
     //    （DSH 的 scope 链不继承父 agent 的层，因此父会话已选档案不会自动落到子代理身上）。
@@ -639,6 +817,11 @@ export function hostCore(ctx, opts, rpc) {
       } catch (e) { /* noop */ }
     }
     identity.clear()
+    for (const entry of persona.values()) {
+      try { entry.disposer() } catch (e) { /* noop */ }
+    }
+    persona.clear()
+    warnedOnce.clear()
     for (const d of handles) {
       try { d() } catch (e) { /* noop */ }
     }
