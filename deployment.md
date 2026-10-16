@@ -5,7 +5,7 @@
 
 ## 如何部署（下次 AI 会话操作手册）
 
-> **离线自检（无需 DSH 运行时）**：改完 `src/core/` 先跑 `node scripts/verify-offline.mjs`（90 项：真实
+> **离线自检（无需 DSH 运行时）**：改完 `src/core/` 先跑 `node scripts/verify-offline.mjs`（93 项：真实
 > `.deepseek.yaml` 结构守护 / YAML 解析 / 多文件档案合并 / 开场白覆盖语义 / persona 段清空替换语义 /
 > 子代理档案继承 / 既有行为回归），
 > 全过再构建；改解析器、覆盖逻辑、装配监听器或会话/子代理语义时请连同该脚本一起维护（项数随用例增删变化，以脚本输出为准）。
@@ -65,7 +65,7 @@
      「当前会话已通过界面选择 .deepseek.yaml 提示词档案」段落。one-shot 子代理会话**没有输入区**属 DSH 设计（预期无下拉框）。
    - **persona 段清空/替换**（pkg-28，internals.md；静态/动态同机制）：**新建会话** → 系统提示词里不再出现
      preset 自带的那句 `You are a coding agent powered by the …model.`（`.deepseek.yaml` 配
-     `persona_clear: true` 时）；改配 `persona_prompt` 则换成该文件正文。同时确认工作区 `AGENTS.md`
+     **默认即清空**，无需配置）；配 `persona_prompt` 则换成该文件正文、配 `persona_clear: false` 可保留 DSH 原句。同时确认工作区 `AGENTS.md`
      的注入**仍在**（语言要求 / 文件修改规范，来自 `~/.dsh/AGENTS.md`）——persona 只改一个 section，不影响档案与它。
      ⚠️ 若某会话没生效：**先看它当前是哪个模式**（minimal 的 `complete: true` 会让改写静默失效），别先翻代码。
 7. **改动后落盘**：把更新后的核心/壳代码同步写回 `src/`，并在本 README CHANGELOG.md 版本历史登记变更。

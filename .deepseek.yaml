@@ -1,10 +1,11 @@
 workspace:
   name: "期权分析"
   #global_prompt: doc/prompts/global.md
-  # 工作区级 persona 段覆盖（internals.md）；两键都缺省 = 完全不改写 preset 原有 persona：
-  #   persona_prompt: <path>  用该文件正文**替换** persona 段
-  #   persona_clear: true     **清空** persona 段（该键优先于 persona_prompt）
-  # 当前启用「清空」：去掉 preset 自带的 "You are a coding agent powered by the {{model}} model."
+  # 工作区级 persona 段覆盖（features.md / internals.md）：**不配置也默认清空** preset 自带的
+  # "You are a coding agent powered by the {{model}} model."（本文件缺失时同样清空）。
+  #   persona_prompt: <path>  用该文件正文**替换** persona 段（不配则清空）
+  #   persona_clear: false    保留 preset 原句（唯一的 opt-out）
+  # 下面这行是显式声明，等价于默认行为——留着便于一眼看出本工作区确实要清空。
   persona_clear: true
   system_prompts:
     default:

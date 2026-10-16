@@ -285,7 +285,7 @@ src/static/*.js   →  lib/*.js           →  dsh plugin 安装（发布）
 **目标**：去掉（或替换）系统提示词开头**由 preset 自带**的那句
 `You are a coding agent powered by the {{model}} model.`（段名 `deployment:persona-prefix`，order 0）——
 即 `harness:identity`（第 1 句）之外的**第 2 句**，且可按工作区配置。
-面向使用者的配置语义（`persona_prompt` / `persona_clear`、缺省不改写、空文件等价清空）见 `features.md`。
+面向使用者的配置语义（**默认清空**、`persona_clear: false` 才保留、`persona_prompt` 替换、优先级表）见 `features.md`。
 
 **为什么必须走 `system-prompt/assemble` 监听器**：
 

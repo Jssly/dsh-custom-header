@@ -35,23 +35,33 @@
    - ⚠️ **one-shot 子代理会话没有输入区**：DSH `ui-subagent` 会用只读 composer 接管 `conversation.composer` 链，
      `conversation.input.left/right` 槽整体不渲染——这是 DSH 的既有设计，插件无法在该会话显示下拉框
      （continuable 子代理会话在有输入区时正常显示）。详见 internals.md。
-9. **persona 段清空 / 替换（`workspace.persona_prompt` / `workspace.persona_clear`，2026-10-16 新增）**：
+9. **persona 段清空 / 替换（`workspace.persona_prompt` / `workspace.persona_clear`）**：
    去掉（或替换）系统提示词开头**由 preset 自带**的那句
    `You are a coding agent powered by the {{model}} model.`（段名 `deployment:persona-prefix`）——
-   即 internals.md 处理的 `harness:identity`（第 1 句）之外的**第 2 句**。
+   即 `harness:identity`（第 1 句）之外的**第 2 句**。
+   **默认就是「清空」：什么都不配也生效，连工作区没有 `.deepseek.yaml` 也一样。**
    - 与档案选择、下拉框**完全解耦**：`agent/created` 时在会话 agent 作用域挂
      `system-prompt/assemble` 监听器，改写**装配结果**里的该段（不能用同名 shadow——该槽位在 agent 层
      已有 owner，见 internals.md）；
-   - 配置示例（二选一，都缺省则完全不改写）：
+   - 配置与优先级（`.deepseek.yaml` → `workspace`）：
+
+     | 配置 | 结果 |
+     |---|---|
+     | 什么都不写（或没有 `.deepseek.yaml`） | **清空**（默认行为） |
+     | `persona_clear: true` | 清空（显式写出；优先于 `persona_prompt`） |
+     | `persona_prompt: <path>` | 用该文件正文**替换**该段（路径相对会话 cwd，占位符见 internals.md） |
+     | `persona_clear: false` | **不改写**——保留 preset 原句（唯一的 opt-out） |
+
+   - 示例：
 
      ```yaml
      workspace:
-       persona_clear: true                      # 清空该段（等价于"没有这段"）
-       # persona_prompt: doc/prompts/persona.md # 或：用该文件正文替换该段（路径相对会话 cwd，占位符见 internals.md）
+       # 默认即清空，无需配置；按需选用下面两行
+       # persona_prompt: doc/prompts/persona.md   # 换成自己的话
+       # persona_clear: false                     # 或：保留 DSH 原句
      ```
-   - **清空必须显式**：与 `global_prompt` 的「空值/空文件即未配置」语义不同，本功能的核心就是「清空」，
-     所以清空由 `persona_clear: true` 表达；替换源为空文件同样等价清空；
-   - **未配置（两键都缺省）/ 替换源文件读不到 → 完全不改写**：绝不误删 preset 原有的 persona（只记 warn）；
+   - **读不到替换源**（文件不存在）→ 本次不改写 + 一条 warn（保留 preset 原句，不静默清掉）；
+     替换源为**空文件** → 等价清空；
    - 无 UI / RPC 变更（不新增下拉框与字段）：诊断靠 Host 日志与让会话自述 system prompt；
    - ⚠️ **替换正文沿用原 persona 段的插值规则**：正文里完整的 `{{…}}` 仍会按 prompt variables
      解析（未知变量会让装配抛错）；要「原样注入」就别在正文里写 `{{…}}`。

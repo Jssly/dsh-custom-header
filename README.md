@@ -20,7 +20,7 @@
 ## 快速开始
 
 ```bash
-node scripts/verify-offline.mjs            # 离线自检（90 项，零依赖，无需 DSH 运行时）
+node scripts/verify-offline.mjs            # 离线自检（93 项，零依赖，无需 DSH 运行时）
 node build.mjs                             # 构建：dist/dynamic/*（动态） + lib/*（静态）
 dsh plugin --profile web add file:$(pwd)   # 静态发布：走 DSH 插件安装流程（之后需重启 dsh web）
 ```
@@ -56,7 +56,7 @@ dsh plugin --profile web add file:$(pwd)   # 静态发布：走 DSH 插件安装
 | `src/static/host.js` | 静态模式 Host 壳（ESM import 核心；`connection.register(ctx, '/rpc', ...)` 适配） |
 | `src/static/client.js` | 静态模式 Client 壳（ESM import 核心；`connection.rpc.call` 适配） |
 | `build.mjs` | 双模式构建脚本（动态内联 → `dist/dynamic/`；静态 esbuild → `lib/`） |
-| `scripts/verify-offline.mjs` | **离线验证脚本**（零依赖，90 项：真实 `.deepseek.yaml` 结构守护 + YAML 解析 / 多文件合并 / 开场白覆盖 / persona 段清空替换 / 子代理档案继承 / 回归；`node scripts/verify-offline.mjs`） |
+| `scripts/verify-offline.mjs` | **离线验证脚本**（零依赖，93 项：真实 `.deepseek.yaml` 结构守护 + YAML 解析 / 多文件合并 / 开场白覆盖 / persona 段清空替换 / 子代理档案继承 / 回归；`node scripts/verify-offline.mjs`） |
 | `cordis.patch.yml` | 静态模式挂载层（`dsh plugin` 安装时插入 loader）；**顶层**另有一条 `includeHarnessIdentity: false` 覆盖，关掉第一方开场白（见 `internals.md`） |
 | `package.json` | 项目元信息（`dsh.bundle.patch` / `dsh.client` / `exports` / `build` 脚本 / `files` 随包白名单） |
 | `dist/dynamic/{host,client}.js` | **构建产物**：动态函数体（cordis_define 用；勿手改） |

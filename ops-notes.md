@@ -60,5 +60,5 @@
 3. **确认 profile 里是新代码**：`md5sum lib/index.js` 与 profile 拷贝对比（见 `deployment.md`）；
    静态还得确认重启过 web。
 4. **确认工作区配置**：`.deepseek.yaml` 在**会话 cwd**（不是部署根目录）下、档案 `file` / `global_prompt` /
-   `persona_prompt` 指向的文件真实存在、`persona_clear` 是布尔。
+   `persona_prompt` 指向的文件真实存在（若配了；**不配则默认清空**）、`persona_clear` 为布尔或未配置。
 5. **仍不对**：让会话自述 system prompt，对照 `features.md` 的注入内容说明逐项核对。

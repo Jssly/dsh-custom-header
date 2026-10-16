@@ -9,8 +9,9 @@
  *   E. 子代理会话档案继承（继承父会话档案 / 回退 default / 不注入普通会话 / 显式优先）+ 未激活会话排队语义
  *      （sessionPersistence 快照按 header.id 匹配、cwd 兜底、不报红字）——见 internals.md
  *   F. workspace.persona_prompt / persona_clear：`system-prompt/assemble` 监听器改写
- *      `deployment:persona-prefix` 段（清空 / 替换 / 两键缺省不改写 / 每次装配重新求值 /
- *      只改 sections / 异常不吞 / 段名落空诊断）——见 internals.md
+ *      `deployment:persona-prefix` 段（**默认清空** / 显式 clear:false 才保留 / 替换 /
+ *      无 .deepseek.yaml 也清空 / 每次装配重新求值 / 只改 sections / 异常不吞 / 段名落空诊断）
+ *      ——见 internals.md
  *
  * 维护须知：对**工作区真实配置**的断言只做结构守护（用户可随时增删档案、改 file 写法）；真实读盘路径
  * 由 A4-A6 用 realFs 端到端覆盖。历史教训：旧 A1-A3 写死了档案名与文件名，2026-09-15 配置改写后即整体失效。
@@ -220,13 +221,18 @@ function makeEnv(opts) {
     (real.workspace.persona_clear === undefined || typeof real.workspace.persona_clear === 'boolean')
     && (real.workspace.persona_prompt === undefined || typeof real.workspace.persona_prompt === 'string'),
     JSON.stringify([real.workspace.persona_clear, real.workspace.persona_prompt]))
+  const personaPromptCfg = typeof real.workspace.persona_prompt === 'string' && real.workspace.persona_prompt.trim().length > 0
+    ? real.workspace.persona_prompt.trim() : null
+  // 与 src/core/host.js 的 resolvePersonaText() 同优先级：clear:true → 清空；有替换源 → 替换；
+  // clear:false → 保留；两键都缺省 → **默认清空**
   const PERSONA_KEY = real.workspace.persona_clear === true ? 'clear'
-    : typeof real.workspace.persona_prompt === 'string' ? 'prompt' : 'none'
+    : personaPromptCfg ? 'prompt'
+      : real.workspace.persona_clear === false ? 'keep' : 'clear'
   await realEnv.created(realAgent.agent)
   const realAssembly = { sections: [{ name: PERSONA_SECTION, order: 0, text: 'PRESET_PERSONA' }], contexts: [], tools: [], variables: {} }
   const realPersonaText = ((await realEnv.assemble(realAgent.agent, realAssembly)).sections[0] || {}).text
-  let expectedPersona = 'PRESET_PERSONA'
-  if (PERSONA_KEY === 'clear') expectedPersona = ''
+  let expectedPersona = ''            // clear 与「缺省 → 默认清空」都是空串
+  if (PERSONA_KEY === 'keep') expectedPersona = 'PRESET_PERSONA'
   else if (PERSONA_KEY === 'prompt') {
     // 与 src/core/host.js 的 substitute() 同规则的独立复刻：档案/开场白/persona 正文共用这套占位符
     expectedPersona = readFileSync(join(ROOT, real.workspace.persona_prompt), 'utf8')
@@ -471,7 +477,7 @@ function makeEnv(opts) {
 }
 
 /* ---------------- F. persona 段清空/替换（workspace.persona_prompt / persona_clear，internals.md） ----------------
- * F1-F14：配置求值——清空 / 替换（含占位符）/ 两键缺省完全不改写 / clear 优先 / 空文件 / 读盘失败 /
+ * F1-F14：配置求值——默认清空 / 替换（含占位符）/ 显式 false 才不改写 / clear 优先 / 空文件 / 读盘失败 /
  *          每次装配重新求值 / 段名落空诊断（一次性 warn）
  * F15-F20：三条自律——只改 sections（tools/contexts/variables 原样透传）、不吞 next() 异常、
  *          不动 name/order；以及子代理会话同样挂载、重复 agent/created 不重复挂载
@@ -516,12 +522,9 @@ function makeEnv(opts) {
   const out2 = await env.assemble(h.agent, makeAssembly())
   eq('F8 persona_prompt → 替换为文件正文（占位符已替换）', personaTextOf(out2), '你是简洁的中文助手，工作区 /ws')
 
-  // F9：两键都缺省 → 完全不改写（同一对象直通，绝不误删 preset 原有 persona）
+  // F9：两键都缺省 → **默认清空**（默认行为，不再需要显式 persona_clear: true）
   env.files['/ws/.deepseek.yaml'] = 'workspace:\n  name: 无 persona 配置\n'
-  const a3 = makeAssembly()
-  const out3 = await env.assemble(h.agent, a3)
-  ok('F9 两键缺省 → 原样返回（preset 的 persona 未被改动）',
-    out3 === a3 && a3.sections[2].text === PRESET_PERSONA, JSON.stringify(personaTextOf(out3)))
+  eq('F9 两键缺省 → 默认清空', personaTextOf(await env.assemble(h.agent, makeAssembly())), '')
 
   // F10：两键同时给出 → clear 优先
   env.files['/ws/.deepseek.yaml'] = 'workspace:\n  persona_clear: true\n  persona_prompt: p/persona.md\n'
@@ -565,6 +568,18 @@ function makeEnv(opts) {
   // F20：重复 agent/created（compact / clear 换 agent 对象）不重复挂载
   await env.created(h.agent)
   ok('F20 重复 agent/created 不重复挂载（先释放旧监听器）', h.assembleHandlers.length === 1, String(h.assembleHandlers.length))
+
+  // F23-F25：唯一的 opt-out（显式 false）、以及「连 .deepseek.yaml 都没有」的默认行为
+  env.files['/ws/.deepseek.yaml'] = 'workspace:\n  persona_clear: false\n'
+  const a23 = makeAssembly()
+  const out23 = await env.assemble(h.agent, a23)
+  ok('F23 显式 persona_clear: false → 不改写（保留 preset 原句）',
+    out23 === a23 && a23.sections[2].text === PRESET_PERSONA, JSON.stringify(personaTextOf(out23)))
+  delete env.files['/ws/.deepseek.yaml']
+  const logsBefore = env.logs.length
+  eq('F24 无 .deepseek.yaml → 仍默认清空', personaTextOf(await env.assemble(h.agent, makeAssembly())), '')
+  ok('F25 缺配置文件不产生告警（默认行为，不是错误）',
+    env.logs.length === logsBefore, JSON.stringify(env.logs.slice(logsBefore)))
 
   // F21-F22：子代理会话同样挂载（与开场白覆盖同路径，注册只作用于该子代理自己的作用域）
   const envSub = makeEnv({ files: { '/ws/.deepseek.yaml': 'workspace:\n  persona_clear: true\n' } })

@@ -42,7 +42,8 @@
  *    `@deepseek-ai/dsh-persona` 行），同层同名 section 重复注册会抛错，所以只能改写装配
  *    结果，不能靠 shadow（与第 6 条的开场白覆盖路径不同）。⚠️ 用最强机制的代价：必须原样
  *    透传 tools/contexts/variables，且**绝不吞 next() 的异常**（internals.md）。
- *    两键都缺省 = 完全不改写，绝不误删 preset 原有的 persona。
+ *    默认行为 = **清空**（连 `.deepseek.yaml` 都没有的工作区也一样）；要保留 preset 原句需显式写
+ *    `persona_clear: false`，要换成自己的话用 `persona_prompt`（见 internals.md / features.md）。
  */
 import { parseYaml } from './yaml.js'
 
@@ -283,15 +284,16 @@ export function hostCore(ctx, opts, rpc) {
     // 工作区级开场白覆盖：非空字符串才是有效配置（YAML 空值/非字符串一律当未配置）
     const raw = ws.global_prompt
     const globalPrompt = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
-    // 工作区级 persona 段覆盖（见 internals.md）：
-    //   persona_prompt: <path> 用该文件正文**替换** preset 的 persona 段
-    //   persona_clear:  true   **清空** persona 段（text 写空串，渲染时被丢弃）
-    // ⚠️ 与上面 global_prompt 的语义**不同**：global_prompt 把「空值 / 空文件」都当未配置，
-    // 而本功能的目的是「清空」，所以清空必须由**显式键**表达；只有两键都缺省才算未配置
-    // （未配置 = 完全不改写，绝不误删 preset 原有的 persona）。
+    // 工作区级 persona 段覆盖（见 internals.md / features.md）：
+    //   persona_prompt: <path>   用该文件正文**替换** preset 的 persona 段
+    //   persona_clear:  true     显式**清空**（text 写空串，渲染时被丢弃）——同时也是**默认行为**
+    //   persona_clear:  false    显式**不改写**（保留 preset 原有的 persona 句）
+    // ⚠️ 与上面 global_prompt 的语义不同：global_prompt 是「空值 / 空文件即未配置、不覆盖」；
+    // 本功能默认就是「清空」，所以 clear 用**三态**表达：true / false / null（未配置 → 走默认清空）。
     const rawPersona = ws.persona_prompt
     const personaPrompt = typeof rawPersona === 'string' && rawPersona.trim().length > 0 ? rawPersona.trim() : null
-    const personaClear = ws.persona_clear === true
+    const rawClear = ws.persona_clear
+    const personaClear = rawClear === true ? true : (rawClear === false ? false : null)
     return { profiles, globalPrompt, personaPrompt, personaClear }
   }
 
@@ -405,34 +407,43 @@ export function hostCore(ctx, opts, rpc) {
    * 求值 persona 段覆盖：读 .deepseek.yaml 的 `persona_prompt` / `persona_clear`，
    * 需要时把替换源文件读盘并做占位符替换。
    *
+   * **默认清空**：没有 `.deepseek.yaml`、或两键都缺省，都按「清空」处理——只有显式
+   * `persona_clear: false` 才保留 preset 原有的 persona 句。
+   *
+   * 优先级（同一张表见 features.md）：
+   *   1. `persona_clear: true`                       → 清空（优先于 `persona_prompt`）
+   *   2. `persona_prompt: <path>`                    → 用该文件正文替换（读不到 → 不改写 + 一次性 warn）
+   *   3. `persona_clear: false`（且无 `persona_prompt`）→ 不改写（保留 preset 原句）
+   *   4. 其余（两键都缺省 / 读不到 `.deepseek.yaml`）  → **清空**（默认行为）
+   *
    * **每次装配都重新调用**（不缓存）——这样切档案、改 `.deepseek.yaml`、改替换源文件
    * 之后都无需重启 DSH，也无需重挂监听器；代价是每个模型步两次小文件读。
-   * 本函数**绝不抛错**：任何读盘/解析异常都退化为「本次不改写」（warn 一条带文件名，
-   * 同 key 只报一次）——宁可不生效，也不静默把 preset 原有的 persona 抹掉。
+   * 本函数**绝不抛错**：只有「显式指定了替换源却读不到」才退回「不改写」并 warn 一条。
    *
    * @returns { text: string } —— 要写进 persona 段的文本（'' = 清空）
-   *          或 null —— 不改写（未配置 / 求值失败）
+   *          或 null —— 不改写
    */
   async function resolvePersonaText(cwd) {
-    let ws
+    let ws = null
     try {
       ws = await loadWorkspace(cwd)
     } catch (err) {
-      warnOnce('yaml:' + cwd, '读取 .deepseek.yaml 失败（persona 覆盖本次跳过）: '
-        + String((err && err.message) || err) + '（工作区 ' + cwd + '）')
-      return null
+      // 缺 .deepseek.yaml 是常态（很多工作区根本没有该文件）→ 按默认清空处理，不告警
+      return { text: '' }
     }
-    // 显式清空优先：两键同时给出时以 persona_clear 为准（「清空」是更强的显式意图）
-    if (ws.personaClear) return { text: '' }
-    if (!ws.personaPrompt) return null
-    try {
-      const target = await fs.resolve(ws.personaPrompt, { cwd })
-      return { text: substitute(await fs.readText(target), cwd).trim() }
-    } catch (err) {
-      warnOnce('prompt:' + cwd + ':' + ws.personaPrompt, 'persona_prompt 文件读取失败（persona 覆盖本次跳过，保留 preset 原有 persona）: '
-        + ws.personaPrompt + '（工作区 ' + cwd + '）: ' + String((err && err.message) || err))
-      return null
+    if (ws.personaClear === true) return { text: '' }
+    if (ws.personaPrompt) {
+      try {
+        const target = await fs.resolve(ws.personaPrompt, { cwd })
+        return { text: substitute(await fs.readText(target), cwd).trim() }
+      } catch (err) {
+        warnOnce('prompt:' + cwd + ':' + ws.personaPrompt, 'persona_prompt 文件读取失败（本次不改写，保留 preset 原有 persona）: '
+          + ws.personaPrompt + '（工作区 ' + cwd + '）: ' + String((err && err.message) || err))
+        return null
+      }
     }
+    if (ws.personaClear === false) return null
+    return { text: '' }   // 两键都缺省 → 默认清空
   }
 
   /**
@@ -473,7 +484,7 @@ export function hostCore(ctx, opts, rpc) {
       }
       if (!cwd) return assembled
       const override = await resolvePersonaText(cwd)
-      // 未配置 / 求值失败 → 完全不改写（绝不误删 preset 原有的 persona）
+      // 只有显式 persona_clear: false（且无替换源）才走 null → 不改写；其余都拿到要写入的文本
       if (!override || !assembled || !Array.isArray(assembled.sections)) return assembled
       let hits = 0
       const sections = assembled.sections.map((section) => {
