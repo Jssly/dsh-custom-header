@@ -41,7 +41,6 @@ dsh plugin --profile web add file:$(pwd)   # 静态发布：走 DSH 插件安装
 | `deployment.md` | 部署步骤（动态/静态/共存）、调试手段、随包内容、数据流与安全边界 | 部署 / 排障 |
 | `CHANGELOG.md` | 功能版本历史（pkg-1..28）与编号规则 | 追溯某次改动 |
 | `ops-notes.md` | 运维备忘：部署事实（动态 vs 静态、`file:` 拷贝、生效时机）、上游升级核查、排查顺序 | 排障 / 升级 |
-| `AGENTS.md` | 工作区指令（供 AI 会话读取）：指向本机 DSH 源码路径 | 定位 DSH 安装路径 |
 
 `ops-notes.md` 是开发侧运维记录，**不随包分发**（随包清单见 `deployment.md`）。
 
@@ -67,9 +66,10 @@ dsh plugin --profile web add file:$(pwd)   # 静态发布：走 DSH 插件安装
 | `pnpm-workspace.yaml` | pnpm 构建策略（`allowBuilds: esbuild: true`，允许 esbuild 跑安装脚本） |
 | `.gitignore` | 忽略 `node_modules/`、`.pnpm-store/`、`.idea/` 等 |
 
-**运行期依赖**（DSH 提供，只读参考，勿改）：
-- DSH 源码：`/home/j/.nvm/versions/node/<ver>/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`
+**DSH 相关路径**（只读参考，勿改）：
+- **安装副本**（运行时真正加载的包）：`/home/j/.nvm/versions/node/<ver>/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`
   （**以本机实际安装为准**：本机当前 node `v22.23.2`；此处曾写死 `v24.19.0`，已过时——node 版本升级后路径会变）
+- **源码 clone**（查阅上游实现 / 对照行号时用，非运行路径）：`/mnt/d/deepseek-harness`
 - 构建依赖：`esbuild`（devDependency `^0.28.2`）+ `react`（dependency `^19.2.8`，仅供静态 client bundle 的 seed word
   解析用；动态模式用闭包符号不依赖它）——均经 `pnpm install` 安装。
 

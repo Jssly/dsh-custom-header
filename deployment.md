@@ -66,7 +66,7 @@
    - **persona 段清空/替换**（pkg-28，internals.md；静态/动态同机制）：**新建会话** → 系统提示词里不再出现
      preset 自带的那句 `You are a coding agent powered by the …model.`（`.deepseek.yaml` 配
      `persona_clear: true` 时）；改配 `persona_prompt` 则换成该文件正文。同时确认工作区 `AGENTS.md`
-     的注入（语言要求 / 文件修改规范）**仍在**——persona 只改一个 section，不影响档案与 AGENTS.md。
+     的注入**仍在**（语言要求 / 文件修改规范，来自 `~/.dsh/AGENTS.md`）——persona 只改一个 section，不影响档案与它。
      ⚠️ 若某会话没生效：**先看它当前是哪个模式**（minimal 的 `complete: true` 会让改写静默失效），别先翻代码。
 7. **改动后落盘**：把更新后的核心/壳代码同步写回 `src/`，并在本 README CHANGELOG.md 版本历史登记变更。
 
